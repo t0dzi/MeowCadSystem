@@ -17,6 +17,13 @@ import java.util.List;
  * Отвечает за отрисовку всех геометрических примитивов на холсте.
  */
 public class CanvasPainter {
+    private static final double MIN_DIMENSION_FONT_SIZE = 1.0;
+    private static final double MAX_DIMENSION_FONT_SIZE = 512.0;
+    private static final double MIN_DIMENSION_ARROW_SIZE = 1.0;
+    private static final double MAX_DIMENSION_ARROW_SIZE = 256.0;
+    private static final double MAX_DIMENSION_GAP_SIZE = 512.0;
+    private static final double AXIS_LABEL_FONT_SIZE = 16.0;
+
     private final GraphicsContext gc;
     private final CadModel model;
     private final AppSettings settings;
@@ -94,9 +101,9 @@ public class CanvasPainter {
         Point direction = normalize(segment);
         Point normal = getStableScreenNormal(direction);
         double screenOffset = switch (dimension.getTextPlacement()) {
-            case ABOVE_LINE -> dimension.getTextGap();
+            case ABOVE_LINE -> getDimensionTextGapScreen(dimension);
             case ON_LINE -> 0.0;
-            case BELOW_LINE -> -dimension.getTextGap();
+            case BELOW_LINE -> -getDimensionTextGapScreen(dimension);
         };
         Point textTrackStart = offsetPoint(dimStartScreen, normal, screenOffset);
         double textWidth = getDimensionTextBoundsWithoutPosition(dimension)[2];
@@ -872,23 +879,27 @@ public class CanvasPainter {
         String text = dimension.getDisplayText();
         double fontSize = getDimensionFontSize(dimension);
         double angle = getDimensionTextAngle(dimension);
-        double widthFactor = dimension.getFontVariant().getWidthFactor();
-
-        gc.save();
-        gc.setLineDashes((double[]) null);
-        gc.translate(screenText.getX(), screenText.getY());
-        gc.rotate(angle);
-        gc.scale(widthFactor, 1.0);
-        gc.setFont(Font.font("Arial", FontPosture.ITALIC, fontSize));
-        gc.setTextAlign(TextAlignment.CENTER);
-        gc.setTextBaseline(VPos.CENTER);
-        gc.setFill(gc.getStroke());
-        gc.fillText(text, 0, 0);
-        gc.restore();
+        // Dimension text is drawn in screen space so zoom changes its position,
+        // but not its on-screen size.
+        drawScreenText(
+                text,
+                screenText,
+                angle,
+                dimension.getTextFont(),
+                FontPosture.ITALIC,
+                fontSize,
+                dimension.getFontVariant().getWidthFactor(),
+                gc.getStroke());
     }
 
     private double getDimensionFontSize(DimensionPrimitive dimension) {
-        return Math.max(12.0, Math.min(28.0, dimension.getTextHeight()));
+        return clamp(dimension.getTextHeight() * camera.getScale(),
+                MIN_DIMENSION_FONT_SIZE,
+                MAX_DIMENSION_FONT_SIZE);
+    }
+
+    private double getDimensionTextGapScreen(DimensionPrimitive dimension) {
+        return clamp(dimension.getTextGap() * camera.getScale(), 0.0, MAX_DIMENSION_GAP_SIZE);
     }
 
     private double[] getDimensionTextBounds(DimensionPrimitive dimension, Point screenText) {
@@ -932,9 +943,11 @@ public class CanvasPainter {
                     normal = new Point(-normal.getX(), -normal.getY());
                 }
                 double offset = switch (radialDimension.getTextPlacement()) {
-                    case ABOVE_LINE -> getDimensionFontSize(radialDimension) * 0.45 + radialDimension.getTextGap();
+                    case ABOVE_LINE -> getDimensionFontSize(radialDimension) * 0.45
+                            + getDimensionTextGapScreen(radialDimension);
                     case ON_LINE -> 0.0;
-                    case BELOW_LINE -> -(getDimensionFontSize(radialDimension) * 0.45 + radialDimension.getTextGap());
+                    case BELOW_LINE -> -(getDimensionFontSize(radialDimension) * 0.45
+                            + getDimensionTextGapScreen(radialDimension));
                 };
                 return new Point(
                         leaderScreen.getX() + normal.getX() * offset,
@@ -944,9 +957,11 @@ public class CanvasPainter {
             Point shelfEnd = getRadialShelfEndScreen(radialDimension, leaderScreen);
             Point center = midpointPoint(leaderScreen, shelfEnd);
             double offsetY = switch (radialDimension.getTextPlacement()) {
-                case ABOVE_LINE -> -(getDimensionFontSize(radialDimension) * 0.55 + radialDimension.getTextGap());
+                case ABOVE_LINE -> -(getDimensionFontSize(radialDimension) * 0.55
+                        + getDimensionTextGapScreen(radialDimension));
                 case ON_LINE -> 0.0;
-                case BELOW_LINE -> getDimensionFontSize(radialDimension) * 0.55 + radialDimension.getTextGap();
+                case BELOW_LINE -> getDimensionFontSize(radialDimension) * 0.55
+                        + getDimensionTextGapScreen(radialDimension);
             };
             return new Point(center.getX(), center.getY() + offsetY);
         }
@@ -964,9 +979,9 @@ public class CanvasPainter {
                 scalePoint(directionScreen, lengthScreen * dimension.getTextPositionFactor()));
         Point normalScreen = getStableScreenNormal(directionScreen);
         double screenOffset = switch (dimension.getTextPlacement()) {
-            case ABOVE_LINE -> dimension.getTextGap();
+            case ABOVE_LINE -> getDimensionTextGapScreen(dimension);
             case ON_LINE -> 0.0;
-            case BELOW_LINE -> -dimension.getTextGap();
+            case BELOW_LINE -> -getDimensionTextGapScreen(dimension);
         };
         return offsetPoint(anchorScreen, normalScreen, screenOffset);
     }
@@ -975,9 +990,9 @@ public class CanvasPainter {
         Point vertexScreen = toScreen(dimension.getVertexPoint());
         Point directionScreen = normalize(subtract(toScreen(dimension.getTextPosition()), vertexScreen));
         double radialOffset = switch (dimension.getTextPlacement()) {
-            case ABOVE_LINE -> dimension.getTextGap();
+            case ABOVE_LINE -> getDimensionTextGapScreen(dimension);
             case ON_LINE -> 0.0;
-            case BELOW_LINE -> -dimension.getTextGap();
+            case BELOW_LINE -> -getDimensionTextGapScreen(dimension);
         };
 
         double textRadiusScreen = dimension.getRadiusValue() * camera.getScale()
@@ -1062,8 +1077,25 @@ public class CanvasPainter {
         return new double[] { 0.0, 0.0, estimatedTextWidth + 10.0, fontSize * 1.35 };
     }
 
+    private void drawScreenText(String text, Point screenPoint, double angle, String fontFamily,
+                                FontPosture posture, double fontSize, double widthFactor, Paint fill) {
+        gc.save();
+        gc.setLineDashes((double[]) null);
+        gc.translate(screenPoint.getX(), screenPoint.getY());
+        gc.rotate(angle);
+        gc.scale(widthFactor, 1.0);
+        gc.setFont(Font.font(fontFamily, posture, fontSize));
+        gc.setTextAlign(TextAlignment.CENTER);
+        gc.setTextBaseline(VPos.CENTER);
+        gc.setFill(fill);
+        gc.fillText(text, 0, 0);
+        gc.restore();
+    }
+
     private double getArrowScreenSize(double arrowSize) {
-        return Math.max(8.0, Math.min(18.0, arrowSize));
+        return clamp(arrowSize * camera.getScale(),
+                MIN_DIMENSION_ARROW_SIZE,
+                MAX_DIMENSION_ARROW_SIZE);
     }
 
     private Point offsetPoint(Point point, Point direction, double distance) {
@@ -2809,9 +2841,6 @@ public class CanvasPainter {
         gc.setStroke(Color.BLACK);
         gc.setFill(Color.BLACK);
         gc.setLineDashes((double[]) null);
-        gc.setFont(new Font("Arial", 16));
-        gc.setTextAlign(TextAlignment.CENTER);
-        gc.setTextBaseline(VPos.CENTER);
 
         gc.strokeLine(worldZero.getX() - dirXx * huge, worldZero.getY() - dirXy * huge,
                 worldZero.getX() + dirXx * huge, worldZero.getY() + dirXy * huge);
@@ -2851,7 +2880,8 @@ public class CanvasPainter {
         if (t < Double.MAX_VALUE) {
             double lx = center.getX() + t * dx + (-dy) * sideOffset;
             double ly = center.getY() + t * dy + (dx) * sideOffset;
-            gc.fillText(text, lx, ly);
+            drawScreenText(text, new Point(lx, ly), 0.0, "Arial", FontPosture.REGULAR,
+                    AXIS_LABEL_FONT_SIZE, 1.0, gc.getFill());
         }
     }
 }
