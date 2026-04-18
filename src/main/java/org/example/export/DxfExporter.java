@@ -239,6 +239,9 @@ public class DxfExporter {
                     case POLYGON -> writePolygonEntity((Polygon) primitive);
                     case SPLINE -> writeSplineEntity((Spline) primitive);
                     case RECTANGLE -> writeRectangleEntity((Rectangle) primitive);
+                    case LINEAR_DIMENSION, RADIAL_DIMENSION, ANGULAR_DIMENSION -> {
+                        // DXF-экспорт размеров пока не реализован.
+                    }
                 }
             }
         }
@@ -423,6 +426,7 @@ public class DxfExporter {
             case SPLINE -> new PathGeometry(
                     ((Spline) primitive).getSplinePoints(SPLINE_SAMPLES_PER_SEGMENT),
                     ((Spline) primitive).isClosed());
+            case LINEAR_DIMENSION, RADIAL_DIMENSION, ANGULAR_DIMENSION -> null;
         };
     }
 
@@ -973,4 +977,3 @@ public class DxfExporter {
         return version.ordinal() >= DxfVersion.R2000.ordinal();
     }
 }
-

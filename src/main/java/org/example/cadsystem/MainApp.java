@@ -42,6 +42,9 @@ public class MainApp extends Application {
         canvas.heightProperty().bind(canvasContainer.heightProperty());
 
         Label infoLabel = new Label("Готово");
+        infoLabel.setWrapText(true);
+        infoLabel.setMaxWidth(Double.MAX_VALUE);
+        infoLabel.setStyle("-fx-padding: 8 12; -fx-font-size: 12px; -fx-background-color: #fafafa; -fx-border-color: #d0d0d0; -fx-border-width: 1 0 0 0;");
         CanvasPainter painter = new CanvasPainter(canvas.getGraphicsContext2D(), model, settings, camera);
         painter.setDrawingState(drawingState);
 
@@ -53,6 +56,7 @@ public class MainApp extends Application {
         settingsScroll.setFitToWidth(true);
         settingsScroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
         settingsScroll.setStyle("-fx-background-color: transparent; -fx-background: #f0f0f0;");
+        settingsScroll.setPrefWidth(430);
 
         VBox topPanel = new VBox();
         topPanel.getChildren().addAll(
@@ -115,4 +119,3 @@ public class MainApp extends Application {
         launch(args);
     }
 }
-

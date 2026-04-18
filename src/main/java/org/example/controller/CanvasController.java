@@ -70,6 +70,8 @@ public class CanvasController {
                 applyManualInput();
             }
         });
+
+        updateInfoLabel();
     }
 
     public void onKeyPressed(KeyEvent event) {
@@ -82,6 +84,18 @@ public class CanvasController {
             SnapManager snapManager = model.getSnapManager();
             snapManager.setSnapEnabled(!snapManager.isSnapEnabled());
             painter.redrawAll();
+        } else if (event.getCode() == KeyCode.M) {
+            if (handleDimensionModeToggle()) {
+                painter.redrawAll();
+                updateInfoLabel();
+                return;
+            }
+        } else if (event.getCode() == KeyCode.Z) {
+            if (handleDimensionShelfToggle()) {
+                painter.redrawAll();
+                updateInfoLabel();
+                return;
+            }
         } else if (event.getCode() == KeyCode.Q) {
             double delta = event.isShiftDown() ? 15 : 5;
             rotateAroundCenter(delta);
@@ -190,10 +204,13 @@ public class CanvasController {
         }
         
         if (event.getButton() == MouseButton.PRIMARY) {
-            drawingState.addPoint(effectivePoint);
-            
-            if (drawingState.hasEnoughPoints()) {
-                createPrimitive();
+            if (tool == Tool.DIMENSION) {
+                handleDimensionInput(clickPoint, effectivePoint, snap);
+            } else {
+                drawingState.addPoint(effectivePoint);
+                if (drawingState.hasEnoughPoints()) {
+                    createPrimitive();
+                }
             }
         }
         
@@ -232,9 +249,15 @@ public class CanvasController {
         }
         
         if (draggedControlPoint != null && draggedControlPointIndex >= 0) {
-            Point newPos = toWorld(event.getX(), event.getY());
             Primitive selected = model.getSelectedPrimitive();
             if (selected != null) {
+                if (selected instanceof LinearDimension linearDimension && draggedControlPointIndex == 3) {
+                    linearDimension.setTextPositionFactor(
+                            painter.projectLinearDimensionTextFactor(linearDimension, event.getX(), event.getY()));
+                    painter.redrawAll();
+                    return;
+                }
+                Point newPos = toWorld(event.getX(), event.getY());
                 selected.moveControlPoint(draggedControlPointIndex, newPos);
                 painter.redrawAll();
             }
@@ -274,6 +297,12 @@ public class CanvasController {
         
         if (drawingState.getCurrentTool() != Tool.SELECT) {
             Point effectivePos = snap != null ? snap.getPosition() : worldPos;
+            if (drawingState.getCurrentTool() == Tool.DIMENSION
+                    && drawingState.getCreationMethod() == CreationMethod.DIMENSION_ANGLE) {
+                effectivePos = assistAngularDimensionPoint(worldPos, effectivePos, snap);
+            } else if (drawingState.getCurrentTool() == Tool.DIMENSION) {
+                effectivePos = assistLinearDimensionPoint(effectivePos);
+            }
             drawingState.setCurrentMousePosition(effectivePos);
         }
         
@@ -376,6 +405,7 @@ public class CanvasController {
     private void createPrimitive() {
         CreationMethod method = drawingState.getCreationMethod();
         List<Point> points = new ArrayList<>(drawingState.getCollectedPoints());
+        List<DimensionAnchor> dimensionAnchors = new ArrayList<>(drawingState.getCollectedDimensionAnchors());
         LineStyle style = model.getCurrentStyle();
         
         Primitive primitive = null;
@@ -470,6 +500,44 @@ public class CanvasController {
                         drawingState.getPolygonType(), rotation, style);
                 }
             }
+            case DIMENSION_LINEAR_HORIZONTAL, DIMENSION_LINEAR_VERTICAL, DIMENSION_LINEAR_ALIGNED -> {
+                if (points.size() >= 3 && dimensionAnchors.size() >= 2) {
+                    LinearDimension.Orientation orientation = switch (method) {
+                        case DIMENSION_LINEAR_HORIZONTAL -> LinearDimension.Orientation.HORIZONTAL;
+                        case DIMENSION_LINEAR_VERTICAL -> LinearDimension.Orientation.VERTICAL;
+                        default -> LinearDimension.Orientation.ALIGNED;
+                    };
+                    primitive = new LinearDimension(
+                        dimensionAnchors.get(0),
+                        dimensionAnchors.get(1),
+                        points.get(2),
+                        orientation,
+                        style
+                    );
+                }
+            }
+            case DIMENSION_RADIUS, DIMENSION_DIAMETER -> {
+                Primitive referenced = drawingState.getReferencePrimitive();
+                if (points.size() >= 2 && (referenced instanceof Circle || referenced instanceof Arc)) {
+                    RadialDimension.Kind kind = method == CreationMethod.DIMENSION_DIAMETER
+                        ? RadialDimension.Kind.DIAMETER
+                        : RadialDimension.Kind.RADIUS;
+                    RadialDimension radialDimension = new RadialDimension(referenced, points.get(1), kind, style);
+                    radialDimension.setShelfSide(drawingState.getRadialShelfSide());
+                    primitive = radialDimension;
+                }
+            }
+            case DIMENSION_ANGLE -> {
+                if (points.size() >= 4 && dimensionAnchors.size() >= 3) {
+                    primitive = new AngularDimension(
+                        dimensionAnchors.get(0),
+                        dimensionAnchors.get(1),
+                        dimensionAnchors.get(2),
+                        points.get(3),
+                        style
+                    );
+                }
+            }
             default -> {}
         }
         
@@ -479,6 +547,78 @@ public class CanvasController {
         
         drawingState.reset();
         painter.redrawAll();
+    }
+
+    private void handleDimensionInput(Point clickPoint, Point effectivePoint, SnapPoint snap) {
+        CreationMethod method = drawingState.getCreationMethod();
+        if (method == null) {
+            return;
+        }
+
+        if ((method == CreationMethod.DIMENSION_RADIUS || method == CreationMethod.DIMENSION_DIAMETER)
+                && drawingState.getCollectedPoints().isEmpty()) {
+            Primitive referenced = findPrimitiveAt(clickPoint);
+            if (referenced instanceof Circle || referenced instanceof Arc) {
+                drawingState.setReferencePrimitive(referenced);
+                drawingState.addPoint(clickPoint);
+                if (drawingState.hasEnoughPoints()) {
+                    createPrimitive();
+                }
+            }
+            return;
+        }
+
+        if (method == CreationMethod.DIMENSION_ANGLE) {
+            effectivePoint = assistAngularDimensionPoint(clickPoint, effectivePoint, snap);
+        } else {
+            effectivePoint = assistLinearDimensionPoint(effectivePoint);
+        }
+
+        drawingState.addDimensionPoint(effectivePoint, DimensionAnchor.fromSnapPoint(snap));
+        if (drawingState.hasEnoughPoints()) {
+            createPrimitive();
+        }
+    }
+
+    private boolean handleDimensionModeToggle() {
+        if (drawingState.getCurrentTool() == Tool.DIMENSION && drawingState.cycleDimensionCreationMethod()) {
+            return true;
+        }
+
+        Primitive selected = model.getSelectedPrimitive();
+        if (selected instanceof LinearDimension linearDimension) {
+            LinearDimension.Orientation nextOrientation = switch (linearDimension.getOrientation()) {
+                case HORIZONTAL -> LinearDimension.Orientation.VERTICAL;
+                case VERTICAL -> LinearDimension.Orientation.ALIGNED;
+                case ALIGNED -> LinearDimension.Orientation.HORIZONTAL;
+            };
+            linearDimension.setOrientation(nextOrientation);
+            return true;
+        }
+
+        if (selected instanceof RadialDimension radialDimension) {
+            RadialDimension.Kind nextKind = radialDimension.getKind() == RadialDimension.Kind.RADIUS
+                    ? RadialDimension.Kind.DIAMETER
+                    : RadialDimension.Kind.RADIUS;
+            radialDimension.setKind(nextKind);
+            return true;
+        }
+
+        return false;
+    }
+
+    private boolean handleDimensionShelfToggle() {
+        if (drawingState.getCurrentTool() == Tool.DIMENSION && drawingState.toggleRadialShelfSide()) {
+            return true;
+        }
+
+        Primitive selected = model.getSelectedPrimitive();
+        if (selected instanceof RadialDimension radialDimension) {
+            radialDimension.toggleShelfSide();
+            return true;
+        }
+
+        return false;
     }
 
     private void finishSpline() {
@@ -494,6 +634,208 @@ public class CanvasController {
 
     private Point toWorld(double screenX, double screenY) {
         return painter.toWorld(screenX, screenY);
+    }
+
+    private Point assistAngularDimensionPoint(Point rawPoint, Point effectivePoint, SnapPoint snap) {
+        if (snap != null) {
+            return effectivePoint;
+        }
+
+        int collected = drawingState.getCollectedPoints().size();
+        if (collected != 1 && collected != 2) {
+            return effectivePoint;
+        }
+
+        Primitive primitive = findPrimitiveAt(rawPoint);
+        if (primitive == null) {
+            return effectivePoint;
+        }
+
+        Point projected = projectPointToPrimitive(rawPoint, primitive);
+        return projected != null ? projected : effectivePoint;
+    }
+
+    private Point assistLinearDimensionPoint(Point effectivePoint) {
+        CreationMethod method = drawingState.getCreationMethod();
+        if (method != CreationMethod.DIMENSION_LINEAR_HORIZONTAL
+                && method != CreationMethod.DIMENSION_LINEAR_VERTICAL
+                && method != CreationMethod.DIMENSION_LINEAR_ALIGNED) {
+            return effectivePoint;
+        }
+
+        List<Point> collectedPoints = drawingState.getCollectedPoints();
+        if (collectedPoints.size() != 2) {
+            return effectivePoint;
+        }
+
+        Point currentDirection = getLinearDimensionDirection(collectedPoints.get(0), collectedPoints.get(1), method);
+        Point mouseScreen = painter.toScreen(effectivePoint);
+        double bestDistance = 12.0;
+        Point bestPoint = null;
+
+        for (Primitive primitive : model.getPrimitives()) {
+            if (!(primitive instanceof LinearDimension existingDimension)) {
+                continue;
+            }
+
+            Point existingDirection = normalize(existingDimension.getDirection());
+            double alignment = Math.abs(dot(currentDirection, existingDirection));
+            if (alignment < 0.995) {
+                continue;
+            }
+
+            Point lineStart = existingDimension.getDimensionStart();
+            Point lineEnd = existingDimension.getDimensionEnd();
+            Point projectedScreen = projectPointToInfiniteLine(
+                    mouseScreen,
+                    painter.toScreen(lineStart),
+                    painter.toScreen(lineEnd));
+
+            double screenDistance = distance(mouseScreen, projectedScreen);
+            if (screenDistance > bestDistance) {
+                continue;
+            }
+
+            bestDistance = screenDistance;
+            bestPoint = projectPointToInfiniteLine(effectivePoint, lineStart, lineEnd);
+        }
+
+        return bestPoint != null ? bestPoint : effectivePoint;
+    }
+
+    private Point getLinearDimensionDirection(Point firstPoint, Point secondPoint, CreationMethod method) {
+        return switch (method) {
+            case DIMENSION_LINEAR_HORIZONTAL -> new Point(1, 0);
+            case DIMENSION_LINEAR_VERTICAL -> new Point(0, 1);
+            case DIMENSION_LINEAR_ALIGNED -> normalize(new Point(
+                    secondPoint.getX() - firstPoint.getX(),
+                    secondPoint.getY() - firstPoint.getY()));
+            default -> new Point(1, 0);
+        };
+    }
+
+    private Point projectPointToPrimitive(Point point, Primitive primitive) {
+        if (primitive instanceof Segment segment) {
+            return projectPointToSegment(point, segment.getStartPoint(), segment.getEndPoint());
+        }
+        if (primitive instanceof Circle circle) {
+            return projectPointToCircle(point, circle.getCenter(), circle.getRadius());
+        }
+        if (primitive instanceof Arc arc) {
+            return projectPointToArc(point, arc);
+        }
+        if (primitive instanceof Rectangle rectangle) {
+            return projectPointToPolylineEdges(point, rectangle.getCorners(), true);
+        }
+        if (primitive instanceof Polygon polygon) {
+            return projectPointToPolylineEdges(point, polygon.getVertices(), true);
+        }
+        return null;
+    }
+
+    private Point projectPointToPolylineEdges(Point point, Point[] vertices, boolean closed) {
+        Point bestPoint = null;
+        double bestDistance = Double.MAX_VALUE;
+        int edgeCount = closed ? vertices.length : vertices.length - 1;
+
+        for (int i = 0; i < edgeCount; i++) {
+            Point projected = projectPointToSegment(point, vertices[i], vertices[(i + 1) % vertices.length]);
+            double distance = distance(point, projected);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestPoint = projected;
+            }
+        }
+
+        return bestPoint;
+    }
+
+    private Point projectPointToInfiniteLine(Point point, Point lineStart, Point lineEnd) {
+        double dx = lineEnd.getX() - lineStart.getX();
+        double dy = lineEnd.getY() - lineStart.getY();
+        double lengthSquared = dx * dx + dy * dy;
+        if (lengthSquared < 1e-9) {
+            return lineStart;
+        }
+
+        double t = ((point.getX() - lineStart.getX()) * dx + (point.getY() - lineStart.getY()) * dy) / lengthSquared;
+        return new Point(lineStart.getX() + dx * t, lineStart.getY() + dy * t);
+    }
+
+    private Point projectPointToSegment(Point point, Point start, Point end) {
+        double dx = end.getX() - start.getX();
+        double dy = end.getY() - start.getY();
+        double lengthSquared = dx * dx + dy * dy;
+        if (lengthSquared < 1e-9) {
+            return start;
+        }
+
+        double t = ((point.getX() - start.getX()) * dx + (point.getY() - start.getY()) * dy) / lengthSquared;
+        t = Math.max(0.0, Math.min(1.0, t));
+        return new Point(start.getX() + dx * t, start.getY() + dy * t);
+    }
+
+    private Point projectPointToCircle(Point point, Point center, double radius) {
+        double dx = point.getX() - center.getX();
+        double dy = point.getY() - center.getY();
+        double length = Math.sqrt(dx * dx + dy * dy);
+        if (length < 1e-9) {
+            return new Point(center.getX() + radius, center.getY());
+        }
+        return new Point(center.getX() + dx / length * radius, center.getY() + dy / length * radius);
+    }
+
+    private Point projectPointToArc(Point point, Arc arc) {
+        Point center = arc.getCenter();
+        double angle = Math.atan2(point.getY() - center.getY(), point.getX() - center.getX());
+        double clamped = clampAngleToArc(angle, arc.getStartAngle(), arc.getSweepAngle());
+        return new Point(
+                center.getX() + arc.getRadius() * Math.cos(clamped),
+                center.getY() + arc.getRadius() * Math.sin(clamped));
+    }
+
+    private double clampAngleToArc(double angle, double startAngle, double sweepAngle) {
+        double normalizedAngle = normalizeAngle(angle);
+        double normalizedStart = normalizeAngle(startAngle);
+        double normalizedEnd = normalizeAngle(startAngle + sweepAngle);
+
+        if (sweepAngle >= 0) {
+            if (isAngleBetween(normalizedAngle, normalizedStart, normalizedEnd, true)) {
+                return angle;
+            }
+        } else if (isAngleBetween(normalizedAngle, normalizedEnd, normalizedStart, true)) {
+            return angle;
+        }
+
+        double startDelta = angularDistance(normalizedAngle, normalizedStart);
+        double endDelta = angularDistance(normalizedAngle, normalizedEnd);
+        return startDelta <= endDelta ? startAngle : startAngle + sweepAngle;
+    }
+
+    private boolean isAngleBetween(double angle, double start, double end, boolean counterClockwise) {
+        if (counterClockwise) {
+            if (start <= end) {
+                return angle >= start && angle <= end;
+            }
+            return angle >= start || angle <= end;
+        }
+        if (end <= start) {
+            return angle <= start && angle >= end;
+        }
+        return angle <= start || angle >= end;
+    }
+
+    private double angularDistance(double first, double second) {
+        double diff = Math.abs(first - second) % (Math.PI * 2.0);
+        return Math.min(diff, Math.PI * 2.0 - diff);
+    }
+
+    private double normalizeAngle(double angle) {
+        double normalized = angle % (Math.PI * 2.0);
+        if (normalized < 0) {
+            normalized += Math.PI * 2.0;
+        }
+        return normalized;
     }
 
     private Primitive findPrimitiveAt(Point worldPoint) {
@@ -516,7 +858,7 @@ public class CanvasController {
         double tolerance = 8;
         
         for (ControlPoint cp : primitive.getControlPoints()) {
-            Point screenPos = painter.toScreen(cp.getPosition());
+            Point screenPos = painter.getControlPointScreenPosition(primitive, cp);
             double dx = screenX - screenPos.getX();
             double dy = screenY - screenPos.getY();
             if (Math.sqrt(dx * dx + dy * dy) < tolerance) {
@@ -533,6 +875,18 @@ public class CanvasController {
         return Math.sqrt(dx * dx + dy * dy);
     }
 
+    private double dot(Point p1, Point p2) {
+        return p1.getX() * p2.getX() + p1.getY() * p2.getY();
+    }
+
+    private Point normalize(Point point) {
+        double length = Math.sqrt(point.getX() * point.getX() + point.getY() * point.getY());
+        if (length < 1e-9) {
+            return new Point(1, 0);
+        }
+        return new Point(point.getX() / length, point.getY() / length);
+    }
+
     /**
      * Обновляет статусную строку: координаты курсора, текущий масштаб и подсказку по инструменту.
      */
@@ -543,8 +897,11 @@ public class CanvasController {
         }
         
         String hint = drawingState.getHint();
-        
-        infoLabel.setText(String.format("XY: (%.1f, %.1f) | Zoom: %.2f | %s",
+        if (hint == null || hint.isBlank()) {
+            hint = "Готово";
+        }
+
+        infoLabel.setText(String.format("Курсор: (%.1f, %.1f)    Масштаб: %.2f    Подсказка: %s",
             mousePos.getX(), mousePos.getY(), camera.getScale(), hint));
     }
 
@@ -552,4 +909,3 @@ public class CanvasController {
         return drawingState;
     }
 }
-

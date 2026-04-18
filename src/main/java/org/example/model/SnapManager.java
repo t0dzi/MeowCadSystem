@@ -189,6 +189,41 @@ public class SnapManager {
             case ELLIPSE -> collectEllipseSnaps((Ellipse) primitive, points);
             case POLYGON -> collectPolygonSnaps((Polygon) primitive, points);
             case SPLINE -> collectSplineSnaps((Spline) primitive, points);
+            case LINEAR_DIMENSION, RADIAL_DIMENSION, ANGULAR_DIMENSION -> collectDimensionSnaps((DimensionPrimitive) primitive, points);
+        }
+    }
+
+    private void collectDimensionSnaps(DimensionPrimitive dimension, List<SnapPoint> points) {
+        if (dimension instanceof LinearDimension linearDimension) {
+            points.add(new SnapPoint(linearDimension.getDimensionStart(), SnapType.ENDPOINT, linearDimension));
+            points.add(new SnapPoint(linearDimension.getDimensionEnd(), SnapType.ENDPOINT, linearDimension));
+            points.add(new SnapPoint(linearDimension.getCenter(), SnapType.MIDPOINT, linearDimension));
+            return;
+        }
+
+        if (dimension instanceof RadialDimension radialDimension) {
+            Point attachment = radialDimension.getAttachmentPoint();
+            Point leader = radialDimension.getLeaderPoint();
+            points.add(new SnapPoint(attachment, SnapType.ENDPOINT, radialDimension));
+            points.add(new SnapPoint(leader, SnapType.ENDPOINT, radialDimension));
+            points.add(new SnapPoint(radialDimension.getCenter(), SnapType.CENTER, radialDimension));
+            points.add(new SnapPoint(new Point(
+                    (attachment.getX() + leader.getX()) / 2.0,
+                    (attachment.getY() + leader.getY()) / 2.0),
+                    SnapType.MIDPOINT, radialDimension));
+            return;
+        }
+
+        if (dimension instanceof AngularDimension angularDimension) {
+            Point arcStart = angularDimension.getArcStartPoint();
+            Point arcEnd = angularDimension.getArcEndPoint();
+            points.add(new SnapPoint(arcStart, SnapType.ENDPOINT, angularDimension));
+            points.add(new SnapPoint(arcEnd, SnapType.ENDPOINT, angularDimension));
+            points.add(new SnapPoint(angularDimension.getCenter(), SnapType.CENTER, angularDimension));
+            points.add(new SnapPoint(new Point(
+                    angularDimension.getVertexPoint().getX() + angularDimension.getRadiusValue() * Math.cos(angularDimension.getMiddleAngle()),
+                    angularDimension.getVertexPoint().getY() + angularDimension.getRadiusValue() * Math.sin(angularDimension.getMiddleAngle())),
+                    SnapType.MIDPOINT, angularDimension));
         }
     }
 

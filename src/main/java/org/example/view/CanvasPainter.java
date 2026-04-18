@@ -3,7 +3,9 @@ package org.example.view;
 import javafx.geometry.VPos;
 import javafx.scene.canvas.GraphicsContext;
 import javafx.scene.paint.Color;
+import javafx.scene.paint.Paint;
 import javafx.scene.text.Font;
+import javafx.scene.text.FontPosture;
 import javafx.scene.text.TextAlignment;
 import org.example.model.*;
 
@@ -70,6 +72,46 @@ public class CanvasPainter {
         double wX = rx * Math.cos(rad) - ry * Math.sin(rad);
         double wY = rx * Math.sin(rad) + ry * Math.cos(rad);
         return new Point(wX, wY);
+    }
+
+    public Point getControlPointScreenPosition(Primitive primitive, ControlPoint controlPoint) {
+        if (primitive instanceof DimensionPrimitive dimension
+                && controlPoint.getType() == ControlPoint.Type.CONTROL) {
+            return getDimensionTextScreenPosition(dimension);
+        }
+        return toScreen(controlPoint.getPosition());
+    }
+
+    public double projectLinearDimensionTextFactor(LinearDimension dimension, double screenX, double screenY) {
+        Point dimStartScreen = toScreen(dimension.getDimensionStart());
+        Point dimEndScreen = toScreen(dimension.getDimensionEnd());
+        Point segment = subtract(dimEndScreen, dimStartScreen);
+        double length = distance(dimStartScreen, dimEndScreen);
+        if (length < 1e-6) {
+            return 0.5;
+        }
+
+        Point direction = normalize(segment);
+        Point normal = getStableScreenNormal(direction);
+        double screenOffset = switch (dimension.getTextPlacement()) {
+            case ABOVE_LINE -> dimension.getTextGap();
+            case ON_LINE -> 0.0;
+            case BELOW_LINE -> -dimension.getTextGap();
+        };
+        Point textTrackStart = offsetPoint(dimStartScreen, normal, screenOffset);
+        double textWidth = getDimensionTextBoundsWithoutPosition(dimension)[2];
+        double arrowSize = getArrowScreenSize(dimension.getArrowSize());
+        double textGapLength = getDimensionTextGapLength(dimension, direction);
+        boolean arrowsOutside = length < textGapLength + arrowSize * 2.6;
+        double margin = arrowsOutside ? textWidth / 2.0 : textWidth / 2.0 + arrowSize * 1.1;
+
+        double along = dot(subtract(new Point(screenX, screenY), textTrackStart), direction);
+        double minAlong = margin;
+        double maxAlong = length - margin;
+        if (maxAlong < minAlong) {
+            return 0.5;
+        }
+        return clamp(along, minAlong, maxAlong) / length;
     }
 
     /**
@@ -196,6 +238,10 @@ public class CanvasPainter {
             case ELLIPSE_CENTER_AXES -> drawEllipsePreview(points, mousePos);
             case POLYGON_CENTER_RADIUS -> drawPolygonPreview(points, mousePos);
             case SPLINE_POINTS -> drawSplinePreview(points, mousePos);
+            case DIMENSION_LINEAR_HORIZONTAL, DIMENSION_LINEAR_VERTICAL, DIMENSION_LINEAR_ALIGNED ->
+                    drawLinearDimensionPreview(points, mousePos, method);
+            case DIMENSION_RADIUS, DIMENSION_DIAMETER -> drawRadialDimensionPreview(points, mousePos, method);
+            case DIMENSION_ANGLE -> drawAngularDimensionPreview(points, mousePos);
         }
 
         drawCollectedPoints(points);
@@ -453,6 +499,719 @@ public class CanvasPainter {
         drawSpline(preview);
     }
 
+    private void drawLinearDimension(LinearDimension dimension) {
+        Point first = dimension.getFirstPoint();
+        Point second = dimension.getSecondPoint();
+        Point dimStart = dimension.getDimensionStart();
+        Point dimEnd = dimension.getDimensionEnd();
+        Point normal = dimension.getNormal();
+        Color dimensionColor = resolveDimensionLineColor(dimension);
+        Color extensionColor = resolveExtensionLineColor(dimension);
+
+        double sign = Math.signum(dimension.getSignedOffset());
+        if (Math.abs(sign) < 1e-9) {
+            sign = 1.0;
+        }
+
+        Point firstExtStart = new Point(
+                first.getX() + normal.getX() * sign * dimension.getExtensionLineOffset(),
+                first.getY() + normal.getY() * sign * dimension.getExtensionLineOffset());
+        Point secondExtStart = new Point(
+                second.getX() + normal.getX() * sign * dimension.getExtensionLineOffset(),
+                second.getY() + normal.getY() * sign * dimension.getExtensionLineOffset());
+        Point firstExtEnd = new Point(
+                dimStart.getX() + normal.getX() * sign * dimension.getExtensionLineOvershoot(),
+                dimStart.getY() + normal.getY() * sign * dimension.getExtensionLineOvershoot());
+        Point secondExtEnd = new Point(
+                dimEnd.getX() + normal.getX() * sign * dimension.getExtensionLineOvershoot(),
+                dimEnd.getY() + normal.getY() * sign * dimension.getExtensionLineOvershoot());
+
+        drawWorldLineWithStyle(firstExtStart, firstExtEnd, dimension.getExtensionLineStyle(), extensionColor);
+        drawWorldLineWithStyle(secondExtStart, secondExtEnd, dimension.getExtensionLineStyle(), extensionColor);
+
+        Point drawnDimStart = dimension.getRenderedDimensionStart();
+        Point drawnDimEnd = dimension.getRenderedDimensionEnd();
+
+        Point dimStartScreen = toScreen(dimStart);
+        Point dimEndScreen = toScreen(dimEnd);
+        Point drawStartScreen = toScreen(drawnDimStart);
+        Point drawEndScreen = toScreen(drawnDimEnd);
+        Point direction = normalize(subtract(drawEndScreen, drawStartScreen));
+        double dimensionLength = distance(dimStartScreen, dimEndScreen);
+        double arrowScreenSize = getArrowScreenSize(dimension.getArrowSize());
+        double textGapLength = getDimensionTextGapLength(dimension, direction);
+        boolean arrowsOutside = dimensionLength < textGapLength + arrowScreenSize * 2.6;
+
+        Point lineStart = drawStartScreen;
+        Point lineEnd = drawEndScreen;
+        if (arrowsOutside) {
+            lineStart = offsetPoint(drawStartScreen, direction, -arrowScreenSize * 1.8);
+            lineEnd = offsetPoint(drawEndScreen, direction, arrowScreenSize * 1.8);
+        }
+
+        drawWorldLineWithStyle(screenToWorld(lineStart), screenToWorld(lineEnd), dimension.getLineStyle(), dimensionColor);
+        gc.setStroke(dimensionColor);
+
+        if (arrowsOutside) {
+            drawArrowScreen(dimStartScreen, lineStart, dimension);
+            drawArrowScreen(dimEndScreen, lineEnd, dimension);
+        } else {
+            drawArrowScreen(dimStartScreen, dimEndScreen, dimension);
+            drawArrowScreen(dimEndScreen, dimStartScreen, dimension);
+        }
+
+        drawDimensionText(dimension);
+    }
+
+    private void drawRadialDimension(RadialDimension dimension) {
+        Point centerPoint = dimension.getCenterPoint();
+        Point leaderPoint = dimension.getTextPosition();
+        Point attachmentPoint = dimension.getAttachmentPoint();
+        Color dimensionColor = resolveDimensionLineColor(dimension);
+
+        if (dimension.getKind() == RadialDimension.Kind.DIAMETER) {
+            Point oppositePoint = dimension.getOppositeDiameterPoint();
+            drawWorldLineWithStyle(oppositePoint, attachmentPoint, dimension.getLineStyle(), dimensionColor);
+            drawWorldLineWithStyle(attachmentPoint, leaderPoint, dimension.getLineStyle(), dimensionColor);
+
+            Point oppositeScreen = toScreen(oppositePoint);
+            Point centerScreen = toScreen(dimension.getCenterPoint());
+            Point attachScreen = toScreen(attachmentPoint);
+
+            gc.setStroke(dimensionColor);
+            drawArrowScreen(oppositeScreen, centerScreen, dimension);
+            drawArrowScreen(attachScreen, centerScreen, dimension);
+        } else {
+            drawWorldLineWithStyle(centerPoint, attachmentPoint, dimension.getLineStyle(), dimensionColor);
+            drawWorldLineWithStyle(attachmentPoint, leaderPoint, dimension.getLineStyle(), dimensionColor);
+            gc.setStroke(dimensionColor);
+            drawArrowScreen(toScreen(attachmentPoint), toScreen(centerPoint), dimension);
+        }
+
+        if (dimension.getShelfSide() != RadialDimension.ShelfSide.ALONG_LINE) {
+            Point leaderScreen = toScreen(leaderPoint);
+            Point shelfEndScreen = getRadialShelfEndScreen(dimension, leaderScreen);
+            drawWorldLineWithStyle(leaderPoint, screenToWorld(shelfEndScreen), dimension.getLineStyle(), dimensionColor);
+        }
+
+        gc.setStroke(dimensionColor);
+        drawDimensionText(dimension);
+    }
+
+    private void drawAngularDimension(AngularDimension dimension) {
+        Point vertex = dimension.getVertexPoint();
+        Point arcStart = dimension.getArcStartPoint();
+        Point arcEnd = dimension.getArcEndPoint();
+        Color dimensionColor = resolveDimensionLineColor(dimension);
+        Color extensionColor = resolveExtensionLineColor(dimension);
+
+        Point startDir = normalize(subtract(arcStart, vertex));
+        Point endDir = normalize(subtract(arcEnd, vertex));
+
+        Point firstExtEnd = new Point(
+                arcStart.getX() + startDir.getX() * dimension.getExtensionLineOvershoot(),
+                arcStart.getY() + startDir.getY() * dimension.getExtensionLineOvershoot());
+        Point secondExtEnd = new Point(
+                arcEnd.getX() + endDir.getX() * dimension.getExtensionLineOvershoot(),
+                arcEnd.getY() + endDir.getY() * dimension.getExtensionLineOvershoot());
+
+        drawWorldLineWithStyle(vertex, firstExtEnd, dimension.getExtensionLineStyle(), extensionColor);
+        drawWorldLineWithStyle(vertex, secondExtEnd, dimension.getExtensionLineStyle(), extensionColor);
+
+        drawCircularArc(
+                vertex,
+                dimension.getRadiusValue(),
+                dimension.getStartAngle(),
+                dimension.getSweepAngle(),
+                dimension.getLineStyle(),
+                dimensionColor);
+
+        List<Point> arcSamples = sampleAngularArc(dimension, 24);
+        if (arcSamples.size() >= 3) {
+            gc.setStroke(dimensionColor);
+            drawArrowScreen(toScreen(arcSamples.get(0)), toScreen(arcSamples.get(1)), dimension);
+            drawArrowScreen(toScreen(arcSamples.get(arcSamples.size() - 1)), toScreen(arcSamples.get(arcSamples.size() - 2)), dimension);
+        }
+
+        gc.setStroke(dimensionColor);
+        drawDimensionText(dimension);
+    }
+
+    private void drawCircularArc(Point center, double radius, double startAngle, double sweepAngle,
+            LineStyle style, Color strokeColor) {
+        Paint previousStroke = gc.getStroke();
+        double previousWidth = gc.getLineWidth();
+
+        if (strokeColor != null) {
+            gc.setStroke(strokeColor);
+        }
+
+        if (style == null) {
+            gc.setLineWidth(1.0);
+            gc.setLineDashes((double[]) null);
+        } else {
+            gc.setLineWidth(style.getThickness());
+            applyLineStyle(style);
+        }
+
+        if (style != null && (style.getType() == LineType.WAVY || style.getType() == LineType.ZIGZAG)) {
+            drawCircularArcStyled(center, radius, startAngle, sweepAngle, style);
+        } else {
+            Point screenCenter = toScreen(center);
+            double screenRadius = radius * camera.getScale();
+            double startDeg = Math.toDegrees(startAngle) + camera.getAngle();
+            double sweepDeg = Math.toDegrees(sweepAngle);
+
+            gc.strokeArc(
+                    screenCenter.getX() - screenRadius,
+                    screenCenter.getY() - screenRadius,
+                    screenRadius * 2,
+                    screenRadius * 2,
+                    startDeg,
+                    sweepDeg,
+                    javafx.scene.shape.ArcType.OPEN);
+        }
+
+        gc.setLineDashes((double[]) null);
+        gc.setLineWidth(previousWidth);
+        gc.setStroke(previousStroke);
+    }
+
+    private void drawCircularArcStyled(Point center, double radius, double startAngle, double sweepAngle, LineStyle style) {
+        Point screenCenter = toScreen(center);
+        double screenRadius = radius * camera.getScale();
+        double arcLength = Math.abs(sweepAngle) * screenRadius;
+
+        double startDeg = Math.toDegrees(startAngle) + camera.getAngle();
+        double sweepDeg = Math.toDegrees(sweepAngle);
+        LineType type = style.getType();
+
+        if (type == LineType.WAVY) {
+            double amplitude = style.getWaveAmplitude() * camera.getScale();
+            double waveLength = style.getWaveLength() * camera.getScale();
+
+            int numWaves = Math.max(2, (int) Math.round(arcLength / waveLength));
+            int steps = numWaves * 24;
+
+            gc.beginPath();
+            for (int i = 0; i <= steps; i++) {
+                double t = (double) i / steps;
+                double waveOffset = amplitude * Math.sin(numWaves * t * 2 * Math.PI);
+                double r = screenRadius + waveOffset;
+                double angleDeg = startDeg + sweepDeg * t;
+                double angleRad = Math.toRadians(angleDeg);
+                double x = screenCenter.getX() + r * Math.cos(angleRad);
+                double y = screenCenter.getY() - r * Math.sin(angleRad);
+
+                if (i == 0) {
+                    gc.moveTo(x, y);
+                } else {
+                    gc.lineTo(x, y);
+                }
+            }
+            gc.stroke();
+
+        } else if (type == LineType.ZIGZAG) {
+            double zigHeight = 8.0 * camera.getScale();
+            double zigWidth = 16.0 * camera.getScale();
+            int numZigzags = 3;
+
+            double[] params = style.getDashPattern();
+            if (params != null && params.length >= 3) {
+                zigHeight = params[0] * camera.getScale();
+                zigWidth = params[1] * camera.getScale();
+                numZigzags = Math.max(1, (int) params[2]);
+            }
+
+            int numSamples = 120;
+            List<Point> arcPoints = new java.util.ArrayList<>();
+            for (int i = 0; i <= numSamples; i++) {
+                double t = (double) i / numSamples;
+                double angleDeg = startDeg + sweepDeg * t;
+                double angleRad = Math.toRadians(angleDeg);
+                double x = screenCenter.getX() + screenRadius * Math.cos(angleRad);
+                double y = screenCenter.getY() - screenRadius * Math.sin(angleRad);
+                arcPoints.add(new Point(x, y));
+            }
+
+            double[] cumLengths = new double[arcPoints.size()];
+            cumLengths[0] = 0;
+            for (int i = 1; i < arcPoints.size(); i++) {
+                Point prev = arcPoints.get(i - 1);
+                Point curr = arcPoints.get(i);
+                double segLen = Math.sqrt(
+                        Math.pow(curr.getX() - prev.getX(), 2) +
+                                Math.pow(curr.getY() - prev.getY(), 2));
+                cumLengths[i] = cumLengths[i - 1] + segLen;
+            }
+            double totalLength = cumLengths[arcPoints.size() - 1];
+
+            double[] zigzagPositions = new double[numZigzags];
+            for (int z = 0; z < numZigzags; z++) {
+                double tCenter = (double) (z + 1) / (numZigzags + 1);
+                zigzagPositions[z] = tCenter * totalLength;
+            }
+
+            List<double[]> resultPoints = new java.util.ArrayList<>();
+            resultPoints.add(new double[] { arcPoints.get(0).getX(), arcPoints.get(0).getY() });
+
+            double pathStep = Math.max(4, totalLength / 120);
+            double s = pathStep;
+            int zigzagIdx = 0;
+
+            while (s < totalLength) {
+                if (zigzagIdx < numZigzags) {
+                    double nextZigzag = zigzagPositions[zigzagIdx];
+                    if (s >= nextZigzag - zigWidth / 2) {
+                        double centerDist = nextZigzag;
+
+                        double beforeDist = centerDist - zigWidth / 2;
+                        double[] ptBefore = pointOnPolyline(arcPoints, cumLengths, beforeDist);
+                        resultPoints.add(new double[] { ptBefore[0], ptBefore[1] });
+
+                        double d1 = centerDist - zigWidth / 4;
+                        double[] pt1 = pointOnPolyline(arcPoints, cumLengths, d1);
+                        resultPoints.add(new double[] { pt1[0] + pt1[2] * zigHeight, pt1[1] + pt1[3] * zigHeight });
+
+                        double d2 = centerDist + zigWidth / 4;
+                        double[] pt2 = pointOnPolyline(arcPoints, cumLengths, d2);
+                        resultPoints.add(new double[] { pt2[0] - pt2[2] * zigHeight, pt2[1] - pt2[3] * zigHeight });
+
+                        double afterDist = centerDist + zigWidth / 2;
+                        double[] ptAfter = pointOnPolyline(arcPoints, cumLengths, afterDist);
+                        resultPoints.add(new double[] { ptAfter[0], ptAfter[1] });
+
+                        s = afterDist + pathStep;
+                        zigzagIdx++;
+                        continue;
+                    }
+                }
+
+                double[] pt = pointOnPolyline(arcPoints, cumLengths, s);
+                resultPoints.add(new double[] { pt[0], pt[1] });
+                s += pathStep;
+            }
+
+            Point lastPt = arcPoints.get(arcPoints.size() - 1);
+            resultPoints.add(new double[] { lastPt.getX(), lastPt.getY() });
+
+            gc.beginPath();
+            gc.moveTo(resultPoints.get(0)[0], resultPoints.get(0)[1]);
+            for (int i = 1; i < resultPoints.size(); i++) {
+                gc.lineTo(resultPoints.get(i)[0], resultPoints.get(i)[1]);
+            }
+            gc.stroke();
+        }
+    }
+
+    private List<Point> sampleAngularArc(AngularDimension dimension, int steps) {
+        List<Point> points = new java.util.ArrayList<>();
+        Point vertex = dimension.getVertexPoint();
+        double radius = dimension.getRadiusValue();
+        double start = dimension.getStartAngle();
+        double sweep = dimension.getSweepAngle();
+        int sampleCount = Math.max(8, steps);
+
+        for (int i = 0; i <= sampleCount; i++) {
+            double t = (double) i / sampleCount;
+            double angle = start + sweep * t;
+            points.add(new Point(
+                    vertex.getX() + radius * Math.cos(angle),
+                    vertex.getY() + radius * Math.sin(angle)));
+        }
+        return points;
+    }
+
+    private void drawWorldLineWithStyle(Point worldStart, Point worldEnd, LineStyle style) {
+        double previousWidth = gc.getLineWidth();
+        if (style == null) {
+            gc.setLineWidth(1.0);
+            gc.setLineDashes((double[]) null);
+        } else {
+            gc.setLineWidth(style.getThickness());
+            applyLineStyle(style);
+        }
+        drawStyledLine(worldStart, worldEnd, style);
+        gc.setLineWidth(previousWidth);
+    }
+
+    private void drawWorldLineWithStyle(Point worldStart, Point worldEnd, LineStyle style, Color strokeColor) {
+        Paint previousStroke = gc.getStroke();
+        if (strokeColor != null) {
+            gc.setStroke(strokeColor);
+        }
+        drawWorldLineWithStyle(worldStart, worldEnd, style);
+        gc.setStroke(previousStroke);
+    }
+
+    private Color resolveDimensionLineColor(DimensionPrimitive dimension) {
+        Color currentStroke = getCurrentStrokeColor();
+        if (Color.ORANGERED.equals(currentStroke)) {
+            return currentStroke;
+        }
+        return dimension.getDimensionLineColor() != null ? dimension.getDimensionLineColor() : currentStroke;
+    }
+
+    private Color resolveExtensionLineColor(DimensionPrimitive dimension) {
+        Color currentStroke = getCurrentStrokeColor();
+        if (Color.ORANGERED.equals(currentStroke)) {
+            return currentStroke;
+        }
+        if (dimension.getExtensionLineColor() != null) {
+            return dimension.getExtensionLineColor();
+        }
+        return resolveDimensionLineColor(dimension);
+    }
+
+    private Color getCurrentStrokeColor() {
+        return gc.getStroke() instanceof Color color ? color : settings.getSegmentColor();
+    }
+
+    private void drawDimensionText(DimensionPrimitive dimension) {
+        Point screenText = getDimensionTextScreenPosition(dimension);
+        String text = dimension.getDisplayText();
+        double fontSize = getDimensionFontSize(dimension);
+        double angle = getDimensionTextAngle(dimension);
+        double widthFactor = dimension.getFontVariant().getWidthFactor();
+
+        gc.save();
+        gc.setLineDashes((double[]) null);
+        gc.translate(screenText.getX(), screenText.getY());
+        gc.rotate(angle);
+        gc.scale(widthFactor, 1.0);
+        gc.setFont(Font.font("Arial", FontPosture.ITALIC, fontSize));
+        gc.setTextAlign(TextAlignment.CENTER);
+        gc.setTextBaseline(VPos.CENTER);
+        gc.setFill(gc.getStroke());
+        gc.fillText(text, 0, 0);
+        gc.restore();
+    }
+
+    private double getDimensionFontSize(DimensionPrimitive dimension) {
+        return Math.max(12.0, Math.min(28.0, dimension.getTextHeight()));
+    }
+
+    private double[] getDimensionTextBounds(DimensionPrimitive dimension, Point screenText) {
+        double fontSize = getDimensionFontSize(dimension);
+        double estimatedTextWidth = Math.max(fontSize,
+                dimension.getDisplayText().length() * fontSize * 0.62 * dimension.getFontVariant().getWidthFactor());
+        double width = estimatedTextWidth + 10.0;
+        double height = fontSize * 1.35;
+        return new double[] {
+                screenText.getX() - width / 2.0,
+                screenText.getY() - height / 2.0,
+                width,
+                height
+        };
+    }
+
+    private double getDimensionTextGapLength(DimensionPrimitive dimension, Point direction) {
+        Point textScreen = getDimensionTextScreenPosition(dimension);
+        double[] bounds = getDimensionTextBounds(dimension, textScreen);
+        double halfWidth = bounds[2] / 2.0;
+        double halfHeight = bounds[3] / 2.0;
+        return 2.0 * (Math.abs(direction.getX()) * halfWidth + Math.abs(direction.getY()) * halfHeight) + 8.0;
+    }
+
+    private Point getDimensionTextScreenPosition(DimensionPrimitive dimension) {
+        if (dimension instanceof LinearDimension linearDimension) {
+            return getLinearDimensionTextScreenPosition(linearDimension);
+        }
+
+        if (dimension instanceof AngularDimension angularDimension) {
+            return getAngularDimensionTextScreenPosition(angularDimension);
+        }
+
+        if (dimension instanceof RadialDimension radialDimension) {
+            Point leaderScreen = toScreen(radialDimension.getTextPosition());
+            if (radialDimension.getShelfSide() == RadialDimension.ShelfSide.ALONG_LINE) {
+                Point attachmentScreen = toScreen(radialDimension.getAttachmentPoint());
+                Point direction = normalize(subtract(leaderScreen, attachmentScreen));
+                Point normal = new Point(-direction.getY(), direction.getX());
+                if (normal.getY() > 0) {
+                    normal = new Point(-normal.getX(), -normal.getY());
+                }
+                double offset = switch (radialDimension.getTextPlacement()) {
+                    case ABOVE_LINE -> getDimensionFontSize(radialDimension) * 0.45 + radialDimension.getTextGap();
+                    case ON_LINE -> 0.0;
+                    case BELOW_LINE -> -(getDimensionFontSize(radialDimension) * 0.45 + radialDimension.getTextGap());
+                };
+                return new Point(
+                        leaderScreen.getX() + normal.getX() * offset,
+                        leaderScreen.getY() + normal.getY() * offset);
+            }
+
+            Point shelfEnd = getRadialShelfEndScreen(radialDimension, leaderScreen);
+            Point center = midpointPoint(leaderScreen, shelfEnd);
+            double offsetY = switch (radialDimension.getTextPlacement()) {
+                case ABOVE_LINE -> -(getDimensionFontSize(radialDimension) * 0.55 + radialDimension.getTextGap());
+                case ON_LINE -> 0.0;
+                case BELOW_LINE -> getDimensionFontSize(radialDimension) * 0.55 + radialDimension.getTextGap();
+            };
+            return new Point(center.getX(), center.getY() + offsetY);
+        }
+
+        return toScreen(dimension.getTextPosition());
+    }
+
+    private Point getLinearDimensionTextScreenPosition(LinearDimension dimension) {
+        Point startScreen = toScreen(dimension.getDimensionStart());
+        Point endScreen = toScreen(dimension.getDimensionEnd());
+        Point directionScreen = normalize(subtract(endScreen, startScreen));
+        double lengthScreen = distance(startScreen, endScreen);
+        Point anchorScreen = addPoint(
+                startScreen,
+                scalePoint(directionScreen, lengthScreen * dimension.getTextPositionFactor()));
+        Point normalScreen = getStableScreenNormal(directionScreen);
+        double screenOffset = switch (dimension.getTextPlacement()) {
+            case ABOVE_LINE -> dimension.getTextGap();
+            case ON_LINE -> 0.0;
+            case BELOW_LINE -> -dimension.getTextGap();
+        };
+        return offsetPoint(anchorScreen, normalScreen, screenOffset);
+    }
+
+    private Point getAngularDimensionTextScreenPosition(AngularDimension dimension) {
+        Point vertexScreen = toScreen(dimension.getVertexPoint());
+        Point directionScreen = normalize(subtract(toScreen(dimension.getTextPosition()), vertexScreen));
+        double radialOffset = switch (dimension.getTextPlacement()) {
+            case ABOVE_LINE -> dimension.getTextGap();
+            case ON_LINE -> 0.0;
+            case BELOW_LINE -> -dimension.getTextGap();
+        };
+
+        double textRadiusScreen = dimension.getRadiusValue() * camera.getScale()
+                + Math.max(getDimensionFontSize(dimension), getArrowScreenSize(dimension.getArrowSize()) * 1.5)
+                + radialOffset;
+
+        return new Point(
+                vertexScreen.getX() + directionScreen.getX() * textRadiusScreen,
+                vertexScreen.getY() + directionScreen.getY() * textRadiusScreen);
+    }
+
+    private Point getStableScreenNormal(Point directionScreen) {
+        Point normal = new Point(-directionScreen.getY(), directionScreen.getX());
+        boolean shouldFlip = normal.getY() > 1e-9
+                || (Math.abs(normal.getY()) <= 1e-9 && normal.getX() < 0.0);
+        return shouldFlip ? scalePoint(normal, -1.0) : normal;
+    }
+
+    private Point getRadialShelfEndScreen(RadialDimension dimension, Point leaderScreen) {
+        Point textScreen = leaderScreen;
+        double[] bounds = getDimensionTextBoundsWithoutPosition(dimension);
+        double shelfLength = Math.max(bounds[2] + 18.0, getDimensionFontSize(dimension) * 2.2);
+        double direction = dimension.getShelfSide() == RadialDimension.ShelfSide.LEFT ? -1.0 : 1.0;
+        return new Point(leaderScreen.getX() + direction * shelfLength, leaderScreen.getY());
+    }
+
+    private double getDimensionTextAngle(DimensionPrimitive dimension) {
+        if (dimension instanceof LinearDimension linearDimension) {
+            Point start = toScreen(linearDimension.getRenderedDimensionStart());
+            Point end = toScreen(linearDimension.getRenderedDimensionEnd());
+            return getReadableScreenAngle(start, end);
+        }
+
+        if (dimension instanceof RadialDimension radialDimension) {
+            if (radialDimension.getShelfSide() == RadialDimension.ShelfSide.ALONG_LINE) {
+                Point start = toScreen(radialDimension.getAttachmentPoint());
+                Point end = toScreen(radialDimension.getTextPosition());
+                return getReadableScreenAngle(start, end);
+            }
+            return 0.0;
+        }
+
+        if (dimension instanceof AngularDimension angularDimension) {
+            Point vertexScreen = toScreen(angularDimension.getVertexPoint());
+            Point textScreen = getDimensionTextScreenPosition(angularDimension);
+            Point radialDirection = normalize(subtract(textScreen, vertexScreen));
+            Point tangentEnd = new Point(
+                    textScreen.getX() - radialDirection.getY(),
+                    textScreen.getY() + radialDirection.getX());
+            return getReadableScreenAngle(textScreen, tangentEnd);
+        }
+
+        return 0.0;
+    }
+
+    private double getReadableScreenAngle(Point start, Point end) {
+        double rawAngle = Math.toDegrees(Math.atan2(end.getY() - start.getY(), end.getX() - start.getX()));
+        return normalizeReadableTextAngle(rawAngle);
+    }
+
+    private double normalizeReadableTextAngle(double angle) {
+        double normalized = angle % 360.0;
+        if (normalized > 180.0) {
+            normalized -= 360.0;
+        } else if (normalized <= -180.0) {
+            normalized += 360.0;
+        }
+
+        if (normalized > 90.0) {
+            normalized -= 180.0;
+        } else if (normalized <= -90.0) {
+            normalized += 180.0;
+        }
+
+        return normalized;
+    }
+
+    private double[] getDimensionTextBoundsWithoutPosition(DimensionPrimitive dimension) {
+        double fontSize = getDimensionFontSize(dimension);
+        double estimatedTextWidth = Math.max(fontSize,
+                dimension.getDisplayText().length() * fontSize * 0.62 * dimension.getFontVariant().getWidthFactor());
+        return new double[] { 0.0, 0.0, estimatedTextWidth + 10.0, fontSize * 1.35 };
+    }
+
+    private double getArrowScreenSize(double arrowSize) {
+        return Math.max(8.0, Math.min(18.0, arrowSize));
+    }
+
+    private Point offsetPoint(Point point, Point direction, double distance) {
+        return new Point(
+                point.getX() + direction.getX() * distance,
+                point.getY() + direction.getY() * distance);
+    }
+
+    private Point midpointPoint(Point first, Point second) {
+        return new Point(
+                (first.getX() + second.getX()) / 2.0,
+                (first.getY() + second.getY()) / 2.0);
+    }
+
+    private Point screenToWorld(Point screenPoint) {
+        return toWorld(screenPoint.getX(), screenPoint.getY());
+    }
+
+    private double clamp(double value, double min, double max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private void drawArrowScreen(Point tip, Point toward, DimensionPrimitive dimension) {
+        double dx = toward.getX() - tip.getX();
+        double dy = toward.getY() - tip.getY();
+        double length = Math.sqrt(dx * dx + dy * dy);
+        if (length < 1e-6) {
+            return;
+        }
+
+        double size = getArrowScreenSize(dimension.getArrowSize());
+        double ux = dx / length;
+        double uy = dy / length;
+        double px = -uy;
+        double py = ux;
+
+        double x1 = tip.getX() + ux * size + px * size * 0.45;
+        double y1 = tip.getY() + uy * size + py * size * 0.45;
+        double x2 = tip.getX() + ux * size - px * size * 0.45;
+        double y2 = tip.getY() + uy * size - py * size * 0.45;
+
+        switch (dimension.getArrowType()) {
+            case CLOSED -> {
+                if (dimension.isFilledArrows()) {
+                    gc.setFill(gc.getStroke());
+                    gc.fillPolygon(
+                            new double[] { tip.getX(), x1, x2 },
+                            new double[] { tip.getY(), y1, y2 },
+                            3);
+                } else {
+                    gc.strokePolygon(
+                            new double[] { tip.getX(), x1, x2 },
+                            new double[] { tip.getY(), y1, y2 },
+                            3);
+                }
+            }
+            case OPEN -> {
+                gc.strokeLine(tip.getX(), tip.getY(), x1, y1);
+                gc.strokeLine(tip.getX(), tip.getY(), x2, y2);
+            }
+            case SLASH -> {
+                double slashHalf = size * 0.8;
+                double centerX = tip.getX() + ux * size * 0.15;
+                double centerY = tip.getY() + uy * size * 0.15;
+                gc.strokeLine(
+                        centerX - ux * slashHalf * 0.35 - px * slashHalf,
+                        centerY - uy * slashHalf * 0.35 - py * slashHalf,
+                        centerX + ux * slashHalf * 0.35 + px * slashHalf,
+                        centerY + uy * slashHalf * 0.35 + py * slashHalf);
+            }
+            case DOT -> {
+                double radius = Math.max(1.8, size * 0.18);
+                gc.strokeOval(tip.getX() - radius, tip.getY() - radius, radius * 2.0, radius * 2.0);
+            }
+        }
+    }
+
+    private void drawLinearDimensionPreview(List<Point> points, Point mousePos, DrawingState.CreationMethod method) {
+        if (points.size() < 2 || mousePos == null) {
+            if (points.size() == 1 && mousePos != null) {
+                Point s1 = toScreen(points.get(0));
+                Point s2 = toScreen(mousePos);
+                gc.strokeLine(s1.getX(), s1.getY(), s2.getX(), s2.getY());
+            }
+            return;
+        }
+
+        LinearDimension.Orientation orientation = switch (method) {
+            case DIMENSION_LINEAR_HORIZONTAL -> LinearDimension.Orientation.HORIZONTAL;
+            case DIMENSION_LINEAR_VERTICAL -> LinearDimension.Orientation.VERTICAL;
+            default -> LinearDimension.Orientation.ALIGNED;
+        };
+
+        LinearDimension preview = new LinearDimension(
+                DimensionAnchor.fixed(points.get(0)),
+                DimensionAnchor.fixed(points.get(1)),
+                mousePos,
+                orientation,
+                model.getCurrentStyle());
+        drawLinearDimension(preview);
+    }
+
+    private void drawRadialDimensionPreview(List<Point> points, Point mousePos, DrawingState.CreationMethod method) {
+        Primitive referenced = drawingState.getReferencePrimitive();
+        if (!(referenced instanceof Circle || referenced instanceof Arc) || points.isEmpty() || mousePos == null) {
+            return;
+        }
+
+        RadialDimension.Kind kind = method == DrawingState.CreationMethod.DIMENSION_DIAMETER
+                ? RadialDimension.Kind.DIAMETER
+                : RadialDimension.Kind.RADIUS;
+        RadialDimension preview = new RadialDimension(referenced, mousePos, kind, model.getCurrentStyle());
+        preview.setShelfSide(drawingState.getRadialShelfSide());
+        drawRadialDimension(preview);
+    }
+
+    private void drawAngularDimensionPreview(List<Point> points, Point mousePos) {
+        if (points.isEmpty()) {
+            return;
+        }
+
+        if (points.size() == 1 && mousePos != null) {
+            Point s1 = toScreen(points.get(0));
+            Point s2 = toScreen(mousePos);
+            gc.strokeLine(s1.getX(), s1.getY(), s2.getX(), s2.getY());
+            return;
+        }
+
+        if (points.size() == 2 && mousePos != null) {
+            Point vertex = toScreen(points.get(0));
+            Point first = toScreen(points.get(1));
+            Point second = toScreen(mousePos);
+            gc.strokeLine(vertex.getX(), vertex.getY(), first.getX(), first.getY());
+            gc.strokeLine(vertex.getX(), vertex.getY(), second.getX(), second.getY());
+            return;
+        }
+
+        if (points.size() >= 3 && mousePos != null) {
+            AngularDimension preview = new AngularDimension(
+                    DimensionAnchor.fixed(points.get(0)),
+                    DimensionAnchor.fixed(points.get(1)),
+                    DimensionAnchor.fixed(points.get(2)),
+                    mousePos,
+                    model.getCurrentStyle());
+            drawAngularDimension(preview);
+        }
+    }
+
     private void drawCollectedPoints(List<Point> points) {
         gc.setFill(Color.DODGERBLUE);
         double size = 8;
@@ -470,6 +1229,30 @@ public class CanvasPainter {
         double dx = p2.getX() - p1.getX();
         double dy = p2.getY() - p1.getY();
         return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    private Point subtract(Point p1, Point p2) {
+        return new Point(p1.getX() - p2.getX(), p1.getY() - p2.getY());
+    }
+
+    private Point addPoint(Point p1, Point p2) {
+        return new Point(p1.getX() + p2.getX(), p1.getY() + p2.getY());
+    }
+
+    private Point scalePoint(Point point, double factor) {
+        return new Point(point.getX() * factor, point.getY() * factor);
+    }
+
+    private double dot(Point p1, Point p2) {
+        return p1.getX() * p2.getX() + p1.getY() * p2.getY();
+    }
+
+    private Point normalize(Point p) {
+        double len = Math.sqrt(p.getX() * p.getX() + p.getY() * p.getY());
+        if (len < 1e-9) {
+            return new Point(1, 0);
+        }
+        return new Point(p.getX() / len, p.getY() / len);
     }
 
     private void drawPrimitive(Primitive primitive, boolean isSelected) {
@@ -501,6 +1284,9 @@ public class CanvasPainter {
             case ELLIPSE -> drawEllipse((Ellipse) primitive);
             case POLYGON -> drawPolygon((Polygon) primitive);
             case SPLINE  -> drawSpline((Spline) primitive);
+            case LINEAR_DIMENSION -> drawLinearDimension((LinearDimension) primitive);
+            case RADIAL_DIMENSION -> drawRadialDimension((RadialDimension) primitive);
+            case ANGULAR_DIMENSION -> drawAngularDimension((AngularDimension) primitive);
         }
     }
 
@@ -1672,7 +2458,7 @@ public class CanvasPainter {
         List<ControlPoint> controlPoints = primitive.getControlPoints();
 
         for (ControlPoint cp : controlPoints) {
-            Point screenPos = toScreen(cp.getPosition());
+            Point screenPos = getControlPointScreenPosition(primitive, cp);
             double size = 6;
 
             switch (cp.getType()) {
@@ -2069,4 +2855,3 @@ public class CanvasPainter {
         }
     }
 }
-

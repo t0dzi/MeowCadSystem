@@ -1,12 +1,16 @@
 package org.example.view;
 
+import javafx.collections.FXCollections;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
+import javafx.scene.Node;
 import javafx.scene.control.*;
+import javafx.scene.layout.ColumnConstraints;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
+import javafx.scene.text.Font;
 import javafx.util.converter.NumberStringConverter;
 import org.example.model.*;
 
@@ -30,7 +34,7 @@ public class SettingsView {
     public VBox createView() {
         VBox inputSection = createInputSection();
         VBox displaySection = createDisplaySection();
-        VBox propertySection = createPropertySection();
+        VBox propertySection = createPropertySectionV2();
         VBox editSection = createEditSection();
 
         VBox mainPanel = new VBox(15,
@@ -40,7 +44,8 @@ public class SettingsView {
                 displaySection);
         mainPanel.setPadding(new Insets(10));
         mainPanel.setStyle("-fx-background-color: #f0f0f0;");
-        mainPanel.setPrefWidth(320);
+        mainPanel.setPrefWidth(400);
+        mainPanel.setMinWidth(400);
 
         return mainPanel;
     }
@@ -73,6 +78,7 @@ public class SettingsView {
 
     private void buildEditControls(Primitive primitive) {
         switch (primitive.getType()) {
+            case POINT -> { }
             case SEGMENT -> buildSegmentControls((Segment) primitive);
             case CIRCLE -> buildCircleControls((Circle) primitive);
             case ARC -> buildArcControls((Arc) primitive);
@@ -80,6 +86,7 @@ public class SettingsView {
             case ELLIPSE -> buildEllipseControls((Ellipse) primitive);
             case POLYGON -> buildPolygonControls((Polygon) primitive);
             case SPLINE -> buildSplineControls((Spline) primitive);
+            case LINEAR_DIMENSION, RADIAL_DIMENSION, ANGULAR_DIMENSION -> buildDimensionControlsV5((DimensionPrimitive) primitive);
         }
 
         buildLineStyleControls(primitive);
@@ -585,6 +592,690 @@ public class SettingsView {
                 info, headerGrid, scrollPane, addPointBtn, lengthLabel, hintLabel);
     }
 
+    private void buildDimensionControls(DimensionPrimitive dimension) {
+        GridPane grid = createGrid();
+
+        TextField textField = new TextField(dimension.getTextOverride());
+        TextField textHeightField = createNumberField(dimension.getTextHeight());
+        TextField arrowSizeField = createNumberField(dimension.getArrowSize());
+        TextField extOffsetField = createNumberField(dimension.getExtensionLineOffset());
+        TextField extOvershootField = createNumberField(dimension.getExtensionLineOvershoot());
+        Label measuredValueLabel = new Label(dimension.getDisplayText());
+
+        grid.add(new Label("Значение:"), 0, 0);
+        grid.add(measuredValueLabel, 1, 0);
+        grid.add(new Label("Переопределение:"), 0, 1);
+        grid.add(textField, 1, 1);
+        grid.add(new Label("Высота текста:"), 0, 2);
+        grid.add(textHeightField, 1, 2);
+        grid.add(new Label("Размер стрелки:"), 0, 3);
+        grid.add(arrowSizeField, 1, 3);
+        grid.add(new Label("Смещение выносных:"), 0, 4);
+        grid.add(extOffsetField, 1, 4);
+        grid.add(new Label("Выступ выносных:"), 0, 5);
+        grid.add(extOvershootField, 1, 5);
+
+        CheckBox filledCheck = new CheckBox("Закрашенные стрелки");
+        filledCheck.setSelected(dimension.isFilledArrows());
+
+        Button applyBtn = createApplyButton("Применить", () -> {
+            try {
+                dimension.setTextOverride(textField.getText());
+                dimension.setTextHeight(parseDouble(textHeightField));
+                dimension.setArrowSize(parseDouble(arrowSizeField));
+                dimension.setExtensionLineOffset(parseDouble(extOffsetField));
+                dimension.setExtensionLineOvershoot(parseDouble(extOvershootField));
+                dimension.setFilledArrows(filledCheck.isSelected());
+                measuredValueLabel.setText(dimension.getDisplayText());
+                painter.redrawAll();
+            } catch (NumberFormatException e) {
+                showError("Некорректные значения");
+            }
+        });
+
+        editPropertiesContainer.getChildren().addAll(grid, filledCheck, applyBtn);
+    }
+
+    private void buildDimensionControlsV2(DimensionPrimitive dimension) {
+        GridPane grid = createGrid();
+
+        TextField textField = new TextField(dimension.getTextOverride());
+        TextField textHeightField = createNumberField(dimension.getTextHeight());
+        TextField arrowSizeField = createNumberField(dimension.getArrowSize());
+        TextField extOffsetField = createNumberField(dimension.getExtensionLineOffset());
+        TextField extOvershootField = createNumberField(dimension.getExtensionLineOvershoot());
+        TextField textGapField = createNumberField(dimension.getTextGap());
+        Label measuredValueLabel = new Label(dimension.getDisplayText());
+
+        ToggleGroup placementGroup = new ToggleGroup();
+        RadioButton aboveButton = new RadioButton("Над");
+        RadioButton onButton = new RadioButton("На");
+        RadioButton belowButton = new RadioButton("Под");
+        aboveButton.setToggleGroup(placementGroup);
+        onButton.setToggleGroup(placementGroup);
+        belowButton.setToggleGroup(placementGroup);
+        switch (dimension.getTextPlacement()) {
+            case ABOVE_LINE -> aboveButton.setSelected(true);
+            case ON_LINE -> onButton.setSelected(true);
+            case BELOW_LINE -> belowButton.setSelected(true);
+        }
+        HBox placementButtons = new HBox(8, aboveButton, onButton, belowButton);
+
+        ComboBox<DimensionPrimitive.FontVariant> fontCombo = new ComboBox<>();
+        fontCombo.getItems().addAll(DimensionPrimitive.FontVariant.values());
+        fontCombo.setValue(dimension.getFontVariant());
+        fontCombo.setMaxWidth(Double.MAX_VALUE);
+        fontCombo.setCellFactory(lv -> new ListCell<>() {
+            @Override
+            protected void updateItem(DimensionPrimitive.FontVariant item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : item.getDisplayName());
+            }
+        });
+        fontCombo.setButtonCell(new ListCell<>() {
+            @Override
+            protected void updateItem(DimensionPrimitive.FontVariant item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : item.getDisplayName());
+            }
+        });
+
+        ComboBox<RadialDimension.ShelfSide> shelfCombo = null;
+        if (dimension instanceof RadialDimension radialDimension) {
+            shelfCombo = new ComboBox<>();
+            shelfCombo.getItems().addAll(RadialDimension.ShelfSide.values());
+            shelfCombo.setValue(radialDimension.getShelfSide());
+            shelfCombo.setMaxWidth(Double.MAX_VALUE);
+            shelfCombo.setCellFactory(lv -> new ListCell<>() {
+                @Override
+                protected void updateItem(RadialDimension.ShelfSide item, boolean empty) {
+                    super.updateItem(item, empty);
+                    setText(empty || item == null ? null : item.getDisplayName());
+                }
+            });
+            shelfCombo.setButtonCell(new ListCell<>() {
+                @Override
+                protected void updateItem(RadialDimension.ShelfSide item, boolean empty) {
+                    super.updateItem(item, empty);
+                    setText(empty || item == null ? null : item.getDisplayName());
+                }
+            });
+        }
+
+        int row = 0;
+        grid.add(new Label("Значение:"), 0, row);
+        grid.add(measuredValueLabel, 1, row++);
+        grid.add(new Label("Переопределение:"), 0, row);
+        grid.add(textField, 1, row++);
+        grid.add(new Label("Положение текста:"), 0, row);
+        grid.add(placementButtons, 1, row++);
+        grid.add(new Label("Шрифт:"), 0, row);
+        grid.add(fontCombo, 1, row++);
+        grid.add(new Label("Высота текста:"), 0, row);
+        grid.add(textHeightField, 1, row++);
+        grid.add(new Label("Смещение текста над линией:"), 0, row);
+        grid.add(textGapField, 1, row++);
+        grid.add(new Label("Размер стрелки:"), 0, row);
+        grid.add(arrowSizeField, 1, row++);
+        grid.add(new Label("Смещение выносных:"), 0, row);
+        grid.add(extOffsetField, 1, row++);
+        grid.add(new Label("Выступ выносных:"), 0, row);
+        grid.add(extOvershootField, 1, row++);
+
+        if (shelfCombo != null) {
+            grid.add(new Label("Полка:"), 0, row);
+            grid.add(shelfCombo, 1, row++);
+        }
+
+        CheckBox filledCheck = new CheckBox("Закрашенные стрелки");
+        filledCheck.setSelected(dimension.isFilledArrows());
+
+        ComboBox<RadialDimension.ShelfSide> finalShelfCombo = shelfCombo;
+        Button applyBtn = createApplyButton("Применить", () -> {
+            try {
+                dimension.setTextOverride(textField.getText());
+                DimensionPrimitive.TextPlacement selectedPlacement = aboveButton.isSelected()
+                        ? DimensionPrimitive.TextPlacement.ABOVE_LINE
+                        : belowButton.isSelected()
+                        ? DimensionPrimitive.TextPlacement.BELOW_LINE
+                        : DimensionPrimitive.TextPlacement.ON_LINE;
+                dimension.setTextPlacement(selectedPlacement);
+                dimension.setFontVariant(fontCombo.getValue());
+                dimension.setTextHeight(parseDouble(textHeightField));
+                dimension.setTextGap(parseDouble(textGapField));
+                dimension.setArrowSize(parseDouble(arrowSizeField));
+                dimension.setExtensionLineOffset(parseDouble(extOffsetField));
+                dimension.setExtensionLineOvershoot(parseDouble(extOvershootField));
+                dimension.setFilledArrows(filledCheck.isSelected());
+                if (dimension instanceof RadialDimension radialDimension && finalShelfCombo != null) {
+                    radialDimension.setShelfSide(finalShelfCombo.getValue());
+                }
+                measuredValueLabel.setText(dimension.getDisplayText());
+                painter.redrawAll();
+            } catch (NumberFormatException e) {
+                showError("Некорректные значения");
+            }
+        });
+
+        editPropertiesContainer.getChildren().addAll(grid, filledCheck, applyBtn);
+    }
+
+    private void buildDimensionControlsV3(DimensionPrimitive dimension) {
+        GridPane grid = createGrid();
+
+        TextField textField = new TextField(dimension.getTextOverride());
+        TextField textHeightField = createNumberField(dimension.getTextHeight());
+        TextField arrowSizeField = createNumberField(dimension.getArrowSize());
+        TextField extOffsetField = createNumberField(dimension.getExtensionLineOffset());
+        TextField extOvershootField = createNumberField(dimension.getExtensionLineOvershoot());
+        TextField textGapField = createNumberField(dimension.getTextGap());
+        Label measuredValueLabel = new Label(dimension.getDisplayText());
+
+        ToggleGroup placementGroup = new ToggleGroup();
+        RadioButton aboveButton = new RadioButton("Над");
+        RadioButton onButton = new RadioButton("На");
+        RadioButton belowButton = new RadioButton("Под");
+        aboveButton.setToggleGroup(placementGroup);
+        onButton.setToggleGroup(placementGroup);
+        belowButton.setToggleGroup(placementGroup);
+        switch (dimension.getTextPlacement()) {
+            case ABOVE_LINE -> aboveButton.setSelected(true);
+            case ON_LINE -> onButton.setSelected(true);
+            case BELOW_LINE -> belowButton.setSelected(true);
+        }
+        HBox placementButtons = new HBox(8, aboveButton, onButton, belowButton);
+
+        ComboBox<DimensionPrimitive.FontVariant> fontCombo = new ComboBox<>();
+        fontCombo.getItems().addAll(DimensionPrimitive.FontVariant.values());
+        fontCombo.setValue(dimension.getFontVariant());
+        fontCombo.setMaxWidth(Double.MAX_VALUE);
+        fontCombo.setCellFactory(lv -> new ListCell<>() {
+            @Override
+            protected void updateItem(DimensionPrimitive.FontVariant item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : item.getDisplayName());
+            }
+        });
+        fontCombo.setButtonCell(new ListCell<>() {
+            @Override
+            protected void updateItem(DimensionPrimitive.FontVariant item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : item.getDisplayName());
+            }
+        });
+
+        ComboBox<RadialDimension.ShelfSide> shelfCombo = null;
+        if (dimension instanceof RadialDimension radialDimension) {
+            shelfCombo = new ComboBox<>();
+            shelfCombo.getItems().addAll(RadialDimension.ShelfSide.values());
+            shelfCombo.setValue(radialDimension.getShelfSide());
+            shelfCombo.setMaxWidth(Double.MAX_VALUE);
+            shelfCombo.setCellFactory(lv -> new ListCell<>() {
+                @Override
+                protected void updateItem(RadialDimension.ShelfSide item, boolean empty) {
+                    super.updateItem(item, empty);
+                    setText(empty || item == null ? null : item.getDisplayName());
+                }
+            });
+            shelfCombo.setButtonCell(new ListCell<>() {
+                @Override
+                protected void updateItem(RadialDimension.ShelfSide item, boolean empty) {
+                    super.updateItem(item, empty);
+                    setText(empty || item == null ? null : item.getDisplayName());
+                }
+            });
+        }
+
+        int row = 0;
+        grid.add(new Label("Значение:"), 0, row);
+        grid.add(measuredValueLabel, 1, row++);
+        grid.add(new Label("Переопределение:"), 0, row);
+        grid.add(textField, 1, row++);
+        grid.add(new Label("Положение текста:"), 0, row);
+        grid.add(placementButtons, 1, row++);
+        grid.add(new Label("Шрифт:"), 0, row);
+        grid.add(fontCombo, 1, row++);
+        grid.add(new Label("Высота текста:"), 0, row);
+        grid.add(textHeightField, 1, row++);
+        grid.add(new Label("Смещение текста:"), 0, row);
+        grid.add(textGapField, 1, row++);
+        grid.add(new Label("Размер стрелки:"), 0, row);
+        grid.add(arrowSizeField, 1, row++);
+        grid.add(new Label("Смещение выносных:"), 0, row);
+        grid.add(extOffsetField, 1, row++);
+        grid.add(new Label("Выступ выносных:"), 0, row);
+        grid.add(extOvershootField, 1, row++);
+
+        if (shelfCombo != null) {
+            grid.add(new Label("Полка:"), 0, row);
+            grid.add(shelfCombo, 1, row++);
+        }
+
+        CheckBox filledCheck = new CheckBox("Закрашенные стрелки");
+        filledCheck.setSelected(dimension.isFilledArrows());
+
+        ComboBox<RadialDimension.ShelfSide> finalShelfCombo = shelfCombo;
+        Button applyBtn = createApplyButton("Применить", () -> {
+            try {
+                DimensionPrimitive.TextPlacement selectedPlacement = aboveButton.isSelected()
+                        ? DimensionPrimitive.TextPlacement.ABOVE_LINE
+                        : belowButton.isSelected()
+                        ? DimensionPrimitive.TextPlacement.BELOW_LINE
+                        : DimensionPrimitive.TextPlacement.ON_LINE;
+                dimension.setTextOverride(textField.getText());
+                dimension.setTextPlacement(selectedPlacement);
+                dimension.setFontVariant(fontCombo.getValue());
+                dimension.setTextHeight(parseDouble(textHeightField));
+                dimension.setTextGap(parseDouble(textGapField));
+                dimension.setArrowSize(parseDouble(arrowSizeField));
+                dimension.setExtensionLineOffset(parseDouble(extOffsetField));
+                dimension.setExtensionLineOvershoot(parseDouble(extOvershootField));
+                dimension.setFilledArrows(filledCheck.isSelected());
+                if (dimension instanceof RadialDimension radialDimension && finalShelfCombo != null) {
+                    radialDimension.setShelfSide(finalShelfCombo.getValue());
+                }
+                measuredValueLabel.setText(dimension.getDisplayText());
+                painter.redrawAll();
+            } catch (NumberFormatException e) {
+                showError("Некорректные значения");
+            }
+        });
+
+        editPropertiesContainer.getChildren().addAll(grid, filledCheck, applyBtn);
+    }
+
+    private void buildDimensionControlsV4(DimensionPrimitive dimension) {
+        GridPane grid = createGrid();
+
+        TextField textField = new TextField(dimension.getTextOverride());
+        TextField textHeightField = createNumberField(dimension.getTextHeight());
+        TextField arrowSizeField = createNumberField(dimension.getArrowSize());
+        TextField extOffsetField = createNumberField(dimension.getExtensionLineOffset());
+        TextField extOvershootField = createNumberField(dimension.getExtensionLineOvershoot());
+        TextField textGapField = createNumberField(dimension.getTextGap());
+        TextField dimensionExtensionField = createNumberField(dimension.getDimensionLineExtension());
+        TextField dimensionOffsetField = dimension instanceof LinearDimension linearDimension
+                ? createNumberField(linearDimension.getOffsetDistance())
+                : null;
+        Label measuredValueLabel = new Label(dimension.getDisplayText());
+
+        ToggleGroup placementGroup = new ToggleGroup();
+        RadioButton aboveButton = new RadioButton("Над");
+        RadioButton onButton = new RadioButton("На");
+        RadioButton belowButton = new RadioButton("Под");
+        aboveButton.setToggleGroup(placementGroup);
+        onButton.setToggleGroup(placementGroup);
+        belowButton.setToggleGroup(placementGroup);
+        switch (dimension.getTextPlacement()) {
+            case ABOVE_LINE -> aboveButton.setSelected(true);
+            case ON_LINE -> onButton.setSelected(true);
+            case BELOW_LINE -> belowButton.setSelected(true);
+        }
+        HBox placementButtons = new HBox(8, aboveButton, onButton, belowButton);
+
+        ComboBox<String> fontFamilyCombo = new ComboBox<>(FXCollections.observableArrayList(Font.getFamilies()));
+        fontFamilyCombo.setEditable(false);
+        fontFamilyCombo.setMaxWidth(Double.MAX_VALUE);
+        if (!fontFamilyCombo.getItems().contains(dimension.getTextFont())) {
+            fontFamilyCombo.getItems().add(dimension.getTextFont());
+        }
+        fontFamilyCombo.setValue(dimension.getTextFont());
+
+        ComboBox<DimensionPrimitive.FontVariant> fontVariantCombo = new ComboBox<>();
+        fontVariantCombo.getItems().addAll(DimensionPrimitive.FontVariant.values());
+        fontVariantCombo.setValue(dimension.getFontVariant());
+        fontVariantCombo.setMaxWidth(Double.MAX_VALUE);
+        fontVariantCombo.setCellFactory(lv -> new ListCell<>() {
+            @Override
+            protected void updateItem(DimensionPrimitive.FontVariant item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : item.getDisplayName());
+            }
+        });
+        fontVariantCombo.setButtonCell(new ListCell<>() {
+            @Override
+            protected void updateItem(DimensionPrimitive.FontVariant item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : item.getDisplayName());
+            }
+        });
+
+        ComboBox<DimensionPrimitive.ArrowType> arrowTypeCombo = new ComboBox<>();
+        arrowTypeCombo.getItems().addAll(DimensionPrimitive.ArrowType.values());
+        arrowTypeCombo.setValue(dimension.getArrowType());
+        arrowTypeCombo.setMaxWidth(Double.MAX_VALUE);
+        arrowTypeCombo.setCellFactory(lv -> new ListCell<>() {
+            @Override
+            protected void updateItem(DimensionPrimitive.ArrowType item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : getArrowTypeLabel(item));
+            }
+        });
+        arrowTypeCombo.setButtonCell(new ListCell<>() {
+            @Override
+            protected void updateItem(DimensionPrimitive.ArrowType item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : getArrowTypeLabel(item));
+            }
+        });
+
+        ComboBox<LineStyle> extensionStyleCombo = new ComboBox<>(styleManager.getStyles());
+        extensionStyleCombo.setMaxWidth(Double.MAX_VALUE);
+        extensionStyleCombo.setCellFactory(lv -> new StyleListCell());
+        extensionStyleCombo.setButtonCell(new StyleListCell());
+        extensionStyleCombo.setValue(dimension.getExtensionLineStyle());
+
+        ColorPicker dimensionColorPicker = new ColorPicker(
+                dimension.getDimensionLineColor() != null ? dimension.getDimensionLineColor() : settings.getSegmentColor());
+        ColorPicker extensionColorPicker = new ColorPicker(
+                dimension.getExtensionLineColor() != null ? dimension.getExtensionLineColor() : dimensionColorPicker.getValue());
+
+        ComboBox<RadialDimension.ShelfSide> shelfCombo = null;
+        if (dimension instanceof RadialDimension radialDimension) {
+            shelfCombo = new ComboBox<>();
+            shelfCombo.getItems().addAll(RadialDimension.ShelfSide.values());
+            shelfCombo.setValue(radialDimension.getShelfSide());
+            shelfCombo.setMaxWidth(Double.MAX_VALUE);
+            shelfCombo.setCellFactory(lv -> new ListCell<>() {
+                @Override
+                protected void updateItem(RadialDimension.ShelfSide item, boolean empty) {
+                    super.updateItem(item, empty);
+                    setText(empty || item == null ? null : item.getDisplayName());
+                }
+            });
+            shelfCombo.setButtonCell(new ListCell<>() {
+                @Override
+                protected void updateItem(RadialDimension.ShelfSide item, boolean empty) {
+                    super.updateItem(item, empty);
+                    setText(empty || item == null ? null : item.getDisplayName());
+                }
+            });
+        }
+
+        CheckBox filledCheck = new CheckBox("Закрашенные стрелки");
+        filledCheck.setSelected(dimension.isFilledArrows());
+        filledCheck.setDisable(dimension.getArrowType() != DimensionPrimitive.ArrowType.CLOSED);
+        arrowTypeCombo.valueProperty().addListener((obs, oldValue, newValue) -> {
+            filledCheck.setDisable(newValue != DimensionPrimitive.ArrowType.CLOSED);
+        });
+
+        int row = 0;
+        grid.add(new Label("Значение:"), 0, row);
+        grid.add(measuredValueLabel, 1, row++);
+        grid.add(new Label("Переопределение:"), 0, row);
+        grid.add(textField, 1, row++);
+        grid.add(new Label("Положение текста:"), 0, row);
+        grid.add(placementButtons, 1, row++);
+        grid.add(new Label("Шрифт:"), 0, row);
+        grid.add(fontFamilyCombo, 1, row++);
+        grid.add(new Label("Вариант шрифта:"), 0, row);
+        grid.add(fontVariantCombo, 1, row++);
+        grid.add(new Label("Высота текста:"), 0, row);
+        grid.add(textHeightField, 1, row++);
+        grid.add(new Label("Смещение текста:"), 0, row);
+        grid.add(textGapField, 1, row++);
+        grid.add(new Label("Тип стрелки:"), 0, row);
+        grid.add(arrowTypeCombo, 1, row++);
+        grid.add(new Label("Размер стрелки:"), 0, row);
+        grid.add(arrowSizeField, 1, row++);
+        grid.add(new Label("Стиль выносных линий:"), 0, row);
+        grid.add(extensionStyleCombo, 1, row++);
+        grid.add(new Label("Смещение выносных:"), 0, row);
+        grid.add(extOffsetField, 1, row++);
+        grid.add(new Label("Выступ выносных:"), 0, row);
+        grid.add(extOvershootField, 1, row++);
+
+        if (dimension instanceof LinearDimension) {
+            grid.add(new Label("Выход размерной линии:"), 0, row);
+            grid.add(dimensionExtensionField, 1, row++);
+        }
+
+        grid.add(new Label("Цвет размерной линии:"), 0, row);
+        grid.add(dimensionColorPicker, 1, row++);
+        grid.add(new Label("Цвет выносных линий:"), 0, row);
+        grid.add(extensionColorPicker, 1, row++);
+
+        if (shelfCombo != null) {
+            grid.add(new Label("Полка:"), 0, row);
+            grid.add(shelfCombo, 1, row++);
+        }
+
+        ComboBox<RadialDimension.ShelfSide> finalShelfCombo = shelfCombo;
+        Button applyBtn = createApplyButton("Применить", () -> {
+            try {
+                DimensionPrimitive.TextPlacement selectedPlacement = aboveButton.isSelected()
+                        ? DimensionPrimitive.TextPlacement.ABOVE_LINE
+                        : belowButton.isSelected()
+                        ? DimensionPrimitive.TextPlacement.BELOW_LINE
+                        : DimensionPrimitive.TextPlacement.ON_LINE;
+
+                dimension.setTextOverride(textField.getText());
+                dimension.setTextPlacement(selectedPlacement);
+                dimension.setTextFont(fontFamilyCombo.getValue());
+                dimension.setFontVariant(fontVariantCombo.getValue());
+                dimension.setTextHeight(parseDouble(textHeightField));
+                dimension.setTextGap(parseDouble(textGapField));
+                dimension.setArrowType(arrowTypeCombo.getValue());
+                dimension.setArrowSize(parseDouble(arrowSizeField));
+                dimension.setFilledArrows(filledCheck.isSelected());
+                dimension.setExtensionLineStyle(extensionStyleCombo.getValue());
+                dimension.setExtensionLineOffset(parseDouble(extOffsetField));
+                dimension.setExtensionLineOvershoot(parseDouble(extOvershootField));
+                dimension.setDimensionLineColor(dimensionColorPicker.getValue());
+                dimension.setExtensionLineColor(extensionColorPicker.getValue());
+
+                if (dimension instanceof LinearDimension) {
+                    dimension.setDimensionLineExtension(parseDouble(dimensionExtensionField));
+                }
+                if (dimension instanceof RadialDimension radialDimension && finalShelfCombo != null) {
+                    radialDimension.setShelfSide(finalShelfCombo.getValue());
+                }
+
+                measuredValueLabel.setText(dimension.getDisplayText());
+                painter.redrawAll();
+            } catch (NumberFormatException e) {
+                showError("Некорректные значения");
+            }
+        });
+
+        editPropertiesContainer.getChildren().addAll(grid, filledCheck, applyBtn);
+    }
+
+    private void buildDimensionControlsV5(DimensionPrimitive dimension) {
+        GridPane grid = createDimensionEditorGrid();
+
+        TextField textField = new TextField(dimension.getTextOverride());
+        textField.setPromptText("Оставьте пустым для автоматического значения");
+        TextField textHeightField = createNumberField(dimension.getTextHeight());
+        TextField arrowSizeField = createNumberField(dimension.getArrowSize());
+        TextField extOffsetField = createNumberField(dimension.getExtensionLineOffset());
+        TextField extOvershootField = createNumberField(dimension.getExtensionLineOvershoot());
+        TextField textGapField = createNumberField(dimension.getTextGap());
+        TextField dimensionExtensionField = createNumberField(dimension.getDimensionLineExtension());
+        TextField dimensionOffsetField = dimension instanceof LinearDimension linearDimension
+                ? createNumberField(linearDimension.getOffsetDistance())
+                : null;
+
+        Label measuredValueLabel = new Label(getDimensionMeasuredValueText(dimension));
+        measuredValueLabel.setStyle("-fx-font-weight: bold;");
+        measuredValueLabel.setWrapText(true);
+        measuredValueLabel.setMaxWidth(Double.MAX_VALUE);
+        measuredValueLabel.setTooltip(new Tooltip("Вычисляется автоматически по геометрии"));
+
+        ToggleGroup placementGroup = new ToggleGroup();
+        RadioButton aboveButton = new RadioButton("Над");
+        RadioButton onButton = new RadioButton("На");
+        RadioButton belowButton = new RadioButton("Под");
+        aboveButton.setToggleGroup(placementGroup);
+        onButton.setToggleGroup(placementGroup);
+        belowButton.setToggleGroup(placementGroup);
+        switch (dimension.getTextPlacement()) {
+            case ABOVE_LINE -> aboveButton.setSelected(true);
+            case ON_LINE -> onButton.setSelected(true);
+            case BELOW_LINE -> belowButton.setSelected(true);
+        }
+        aboveButton.setTooltip(new Tooltip("Показывать текст над размерной линией"));
+        onButton.setTooltip(new Tooltip("Показывать текст на размерной линии"));
+        belowButton.setTooltip(new Tooltip("Показывать текст под размерной линией"));
+        HBox placementButtons = new HBox(10, aboveButton, onButton, belowButton);
+        placementButtons.setAlignment(Pos.CENTER_LEFT);
+
+        ComboBox<DimensionPrimitive.FontVariant> fontVariantCombo = new ComboBox<>();
+        fontVariantCombo.getItems().addAll(DimensionPrimitive.FontVariant.values());
+        fontVariantCombo.setValue(dimension.getFontVariant());
+        fontVariantCombo.setMaxWidth(Double.MAX_VALUE);
+        fontVariantCombo.setCellFactory(lv -> new ListCell<>() {
+            @Override
+            protected void updateItem(DimensionPrimitive.FontVariant item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : item.getDisplayName());
+            }
+        });
+        fontVariantCombo.setButtonCell(new ListCell<>() {
+            @Override
+            protected void updateItem(DimensionPrimitive.FontVariant item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : item.getDisplayName());
+            }
+        });
+
+        ComboBox<DimensionPrimitive.ArrowType> arrowTypeCombo = new ComboBox<>();
+        arrowTypeCombo.getItems().addAll(DimensionPrimitive.ArrowType.values());
+        arrowTypeCombo.setValue(dimension.getArrowType());
+        arrowTypeCombo.setMaxWidth(Double.MAX_VALUE);
+        arrowTypeCombo.setCellFactory(lv -> new ListCell<>() {
+            @Override
+            protected void updateItem(DimensionPrimitive.ArrowType item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : item.getDisplayName());
+            }
+        });
+        arrowTypeCombo.setButtonCell(new ListCell<>() {
+            @Override
+            protected void updateItem(DimensionPrimitive.ArrowType item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : item.getDisplayName());
+            }
+        });
+
+        ComboBox<LineStyle> dimensionStyleCombo = new ComboBox<>(styleManager.getStyles());
+        dimensionStyleCombo.setMaxWidth(Double.MAX_VALUE);
+        dimensionStyleCombo.setCellFactory(lv -> new StyleListCell());
+        dimensionStyleCombo.setButtonCell(new StyleListCell());
+        dimensionStyleCombo.setValue(dimension.getLineStyle());
+
+        ComboBox<LineStyle> extensionStyleCombo = new ComboBox<>(styleManager.getStyles());
+        extensionStyleCombo.setMaxWidth(Double.MAX_VALUE);
+        extensionStyleCombo.setCellFactory(lv -> new StyleListCell());
+        extensionStyleCombo.setButtonCell(new StyleListCell());
+        extensionStyleCombo.setValue(dimension.getExtensionLineStyle());
+
+        ColorPicker dimensionColorPicker = new ColorPicker(
+                dimension.getDimensionLineColor() != null ? dimension.getDimensionLineColor() : settings.getSegmentColor());
+        ColorPicker extensionColorPicker = new ColorPicker(
+                dimension.getExtensionLineColor() != null ? dimension.getExtensionLineColor() : dimensionColorPicker.getValue());
+        dimensionColorPicker.setMaxWidth(Double.MAX_VALUE);
+        extensionColorPicker.setMaxWidth(Double.MAX_VALUE);
+
+        ComboBox<RadialDimension.ShelfSide> shelfCombo = null;
+        if (dimension instanceof RadialDimension radialDimension) {
+            shelfCombo = new ComboBox<>();
+            shelfCombo.getItems().addAll(RadialDimension.ShelfSide.values());
+            shelfCombo.setValue(radialDimension.getShelfSide());
+            shelfCombo.setMaxWidth(Double.MAX_VALUE);
+            shelfCombo.setCellFactory(lv -> new ListCell<>() {
+                @Override
+                protected void updateItem(RadialDimension.ShelfSide item, boolean empty) {
+                    super.updateItem(item, empty);
+                    setText(empty || item == null ? null : item.getDisplayName());
+                }
+            });
+            shelfCombo.setButtonCell(new ListCell<>() {
+                @Override
+                protected void updateItem(RadialDimension.ShelfSide item, boolean empty) {
+                    super.updateItem(item, empty);
+                    setText(empty || item == null ? null : item.getDisplayName());
+                }
+            });
+        }
+
+        CheckBox filledCheck = new CheckBox("Заполнять");
+        filledCheck.setSelected(dimension.isFilledArrows());
+        filledCheck.setDisable(dimension.getArrowType() != DimensionPrimitive.ArrowType.CLOSED);
+        filledCheck.setTooltip(new Tooltip("Для закрытых стрелок включает заливку"));
+        arrowTypeCombo.valueProperty().addListener((obs, oldValue, newValue) -> {
+            filledCheck.setDisable(newValue != DimensionPrimitive.ArrowType.CLOSED);
+        });
+
+        int row = 0;
+        row = addDimensionEditorRow(grid, row, "Значение:", measuredValueLabel);
+        row = addDimensionEditorRow(grid, row, "Переопределение текста:", textField);
+        row = addDimensionEditorRow(grid, row, "Положение текста:", placementButtons);
+        row = addDimensionEditorRow(grid, row, "Вариант шрифта:", fontVariantCombo);
+        row = addDimensionEditorRow(grid, row, "Высота текста:", textHeightField);
+        row = addDimensionEditorRow(grid, row, "Смещение текста:", textGapField);
+        row = addDimensionEditorRow(grid, row, "Тип стрелок:", arrowTypeCombo);
+        row = addDimensionEditorRow(grid, row, "Размер стрелок:", arrowSizeField);
+        row = addDimensionEditorRow(grid, row, "Заливка стрелок:", filledCheck);
+        row = addDimensionEditorRow(grid, row, "Стиль размерной линии:", dimensionStyleCombo);
+        row = addDimensionEditorRow(grid, row, "Стиль выносных линий:", extensionStyleCombo);
+        row = addDimensionEditorRow(grid, row, "Смещение выносных линий:", extOffsetField);
+        row = addDimensionEditorRow(grid, row, "Выступ выносных линий:", extOvershootField);
+
+        if (dimension instanceof LinearDimension) {
+            row = addDimensionEditorRow(grid, row, "Отступ размерной линии:", dimensionOffsetField);
+            row = addDimensionEditorRow(grid, row, "Выход размерной линии:", dimensionExtensionField);
+        }
+
+        row = addDimensionEditorRow(grid, row, "Цвет размерной линии:", dimensionColorPicker);
+        row = addDimensionEditorRow(grid, row, "Цвет выносных линий:", extensionColorPicker);
+
+        if (shelfCombo != null) {
+            row = addDimensionEditorRow(grid, row, "Полка:", shelfCombo);
+        }
+
+        ComboBox<RadialDimension.ShelfSide> finalShelfCombo = shelfCombo;
+        Button applyBtn = createApplyButton("Применить", () -> {
+            try {
+                DimensionPrimitive.TextPlacement selectedPlacement = aboveButton.isSelected()
+                        ? DimensionPrimitive.TextPlacement.ABOVE_LINE
+                        : belowButton.isSelected()
+                        ? DimensionPrimitive.TextPlacement.BELOW_LINE
+                        : DimensionPrimitive.TextPlacement.ON_LINE;
+
+                dimension.setTextOverride(textField.getText());
+                dimension.setTextPlacement(selectedPlacement);
+                dimension.setFontVariant(fontVariantCombo.getValue());
+                dimension.setTextHeight(parseDouble(textHeightField));
+                dimension.setTextGap(parseDouble(textGapField));
+                dimension.setArrowType(arrowTypeCombo.getValue());
+                dimension.setArrowSize(parseDouble(arrowSizeField));
+                dimension.setFilledArrows(filledCheck.isSelected());
+                dimension.setLineStyle(dimensionStyleCombo.getValue());
+                dimension.setExtensionLineStyle(extensionStyleCombo.getValue());
+                dimension.setExtensionLineOffset(parseDouble(extOffsetField));
+                dimension.setExtensionLineOvershoot(parseDouble(extOvershootField));
+                dimension.setDimensionLineColor(dimensionColorPicker.getValue());
+                dimension.setExtensionLineColor(extensionColorPicker.getValue());
+
+                if (dimension instanceof LinearDimension) {
+                    ((LinearDimension) dimension).setOffsetDistance(parseDouble(dimensionOffsetField));
+                    dimension.setDimensionLineExtension(parseDouble(dimensionExtensionField));
+                }
+                if (dimension instanceof RadialDimension radialDimension && finalShelfCombo != null) {
+                    radialDimension.setShelfSide(finalShelfCombo.getValue());
+                }
+
+                measuredValueLabel.setText(getDimensionMeasuredValueText(dimension));
+                painter.redrawAll();
+            } catch (NumberFormatException e) {
+                showError("Некорректные значения");
+            }
+        });
+
+        editPropertiesContainer.getChildren().addAll(grid, applyBtn);
+    }
+
     private void rebuildSplinePointsList(Spline spline, VBox pointsBox, Label info, CanvasPainter painter) {
         pointsBox.getChildren().clear();
         int pointCount = spline.getPointCount();
@@ -662,6 +1353,58 @@ public class SettingsView {
         }
     }
 
+    private GridPane createDimensionEditorGrid() {
+        GridPane grid = new GridPane();
+        grid.setHgap(10);
+        grid.setVgap(8);
+        grid.setMaxWidth(Double.MAX_VALUE);
+
+        ColumnConstraints labelColumn = new ColumnConstraints();
+        labelColumn.setMinWidth(165);
+        labelColumn.setPrefWidth(180);
+
+        ColumnConstraints valueColumn = new ColumnConstraints();
+        valueColumn.setHgrow(Priority.ALWAYS);
+        valueColumn.setFillWidth(true);
+
+        grid.getColumnConstraints().addAll(labelColumn, valueColumn);
+        return grid;
+    }
+
+    private int addDimensionEditorRow(GridPane grid, int row, String labelText, Node control) {
+        grid.add(createDimensionEditorLabel(labelText), 0, row);
+        GridPane.setHgrow(control, Priority.ALWAYS);
+        grid.add(control, 1, row);
+        return row + 1;
+    }
+
+    private Label createDimensionEditorLabel(String text) {
+        Label label = new Label(text);
+        label.setWrapText(true);
+        label.setMinWidth(165);
+        label.setPrefWidth(180);
+        label.setTooltip(new Tooltip(text));
+        return label;
+    }
+
+    private String getDimensionMeasuredValueText(DimensionPrimitive dimension) {
+        String formattedValue = formatNumber(dimension.getMeasuredValue());
+        if (dimension instanceof AngularDimension) {
+            return formattedValue + "°";
+        }
+        if (dimension instanceof RadialDimension radialDimension) {
+            return radialDimension.getKind().getPrefix() + formattedValue;
+        }
+        return formattedValue;
+    }
+
+    private String getArrowTypeLabel(DimensionPrimitive.ArrowType arrowType) {
+        if (arrowType == DimensionPrimitive.ArrowType.DOT) {
+            return "Кружок";
+        }
+        return arrowType.getDisplayName();
+    }
+
     private GridPane createGrid() {
         GridPane grid = new GridPane();
         grid.setHgap(8);
@@ -671,7 +1414,8 @@ public class SettingsView {
 
     private TextField createNumberField(double value) {
         TextField field = new TextField(formatNumber(value));
-        field.setPrefWidth(100);
+        field.setPrefWidth(150);
+        field.setMaxWidth(Double.MAX_VALUE);
         return field;
     }
 
@@ -731,6 +1475,67 @@ public class SettingsView {
         });
 
         return new VBox(10, header, styleCombo);
+    }
+
+    private VBox createPropertySectionV2() {
+        Label header = new Label("Стиль и слой");
+        header.setStyle("-fx-font-weight: bold;");
+
+        ComboBox<LineStyle> styleCombo = new ComboBox<>(styleManager.getStyles());
+        styleCombo.setMaxWidth(Double.MAX_VALUE);
+        styleCombo.setCellFactory(lv -> new StyleListCell());
+        styleCombo.setButtonCell(new StyleListCell());
+        styleCombo.setDisable(true);
+
+        ComboBox<String> layerCombo = new ComboBox<>();
+        layerCombo.setMaxWidth(Double.MAX_VALUE);
+        layerCombo.setDisable(true);
+
+        model.selectedPrimitiveProperty().addListener((obs, oldPrim, newPrim) -> {
+            if (newPrim != null) {
+                styleCombo.setDisable(false);
+                styleCombo.setValue(newPrim.getLineStyle());
+
+                layerCombo.setDisable(false);
+                layerCombo.getItems().setAll(model.getLayers().stream().map(Layer::getName).toList());
+                layerCombo.setValue(newPrim.getLayerName());
+            } else {
+                styleCombo.setDisable(true);
+                styleCombo.setValue(null);
+
+                layerCombo.setDisable(true);
+                layerCombo.getItems().clear();
+                layerCombo.setValue(null);
+            }
+        });
+
+        styleCombo.setOnAction(e -> {
+            Primitive selected = model.getSelectedPrimitive();
+            LineStyle selectedStyle = styleCombo.getValue();
+            if (selectedStyle != null) {
+                model.setCurrentStyle(selectedStyle);
+                if (selected != null && selected.getLineStyle() != selectedStyle) {
+                    selected.setLineStyle(selectedStyle);
+                    painter.redrawAll();
+                }
+            }
+        });
+
+        layerCombo.setOnAction(e -> {
+            Primitive selected = model.getSelectedPrimitive();
+            String selectedLayer = layerCombo.getValue();
+            if (selected != null && selectedLayer != null && !selectedLayer.equals(selected.getLayerName())) {
+                selected.setLayerName(selectedLayer);
+                painter.redrawAll();
+            }
+        });
+
+        return new VBox(10,
+                header,
+                new Label("Стиль размерной/контурной линии:"),
+                styleCombo,
+                new Label("Слой:"),
+                layerCombo);
     }
 
     private VBox createInputSection() {
@@ -853,4 +1658,3 @@ public class SettingsView {
         return new VBox(10, header, grid);
     }
 }
-

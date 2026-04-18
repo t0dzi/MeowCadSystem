@@ -36,6 +36,10 @@ public class SnapPoint {
         return sourcePrimitive;
     }
 
+    public Primitive getPrimaryPrimitive() {
+        return sourcePrimitive;
+    }
+
     public Primitive getSecondPrimitive() {
         return secondPrimitive;
     }
