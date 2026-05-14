@@ -74,6 +74,7 @@ public class DxfExporter {
     private static final int ELLIPSE_APPROXIMATION_STEPS = 72;
     private static final double TFLEX_CLOSED_COMPLEX_LINETYPE_PERIODS = 3.0;
     private static final double TFLEX_OPEN_COMPLEX_LINETYPE_PERIODS = 1.0;
+    private static final String APP_ID = "CADSYSTEM";
 
     private final DxfVersion version;
     private final DxfUnits units;
@@ -163,6 +164,18 @@ public class DxfExporter {
         }
         writeTableEnd();
 
+        writeTableStart("STYLE", 1);
+        writeTextStyle();
+        writeTableEnd();
+
+        writeTableStart("DIMSTYLE", 1);
+        writeDimensionStyle();
+        writeTableEnd();
+
+        writeTableStart("APPID", 1);
+        writeAppId();
+        writeTableEnd();
+
         writeSectionEnd();
     }
 
@@ -233,13 +246,17 @@ public class DxfExporter {
                 switch (primitive.getType()) {
                     case POINT -> writePointEntity((PointPrimitive) primitive);
                     case SEGMENT -> writeLineEntity((Segment) primitive);
+                    case POLYLINE -> writePolylineEntity((Polyline) primitive);
                     case CIRCLE -> writeCircleEntity((Circle) primitive);
                     case ARC -> writeArcEntity((Arc) primitive);
                     case ELLIPSE -> writeEllipseEntity((Ellipse) primitive);
                     case POLYGON -> writePolygonEntity((Polygon) primitive);
                     case SPLINE -> writeSplineEntity((Spline) primitive);
                     case RECTANGLE -> writeRectangleEntity((Rectangle) primitive);
-                    case LINEAR_DIMENSION, RADIAL_DIMENSION, ANGULAR_DIMENSION -> {
+                    case LINEAR_DIMENSION -> writeLinearDimensionEntity((LinearDimension) primitive);
+                    case RADIAL_DIMENSION -> writeRadialDimensionEntity((RadialDimension) primitive);
+                    case ANGULAR_DIMENSION -> writeAngularDimensionEntity((AngularDimension) primitive);
+                    default -> {
                         // DXF-экспорт размеров пока не реализован.
                     }
                 }
@@ -314,6 +331,10 @@ public class DxfExporter {
         writeEntityCommon(segment);
         writePoint(segment.getStartPoint(), 10);
         writePoint(segment.getEndPoint(), 11);
+    }
+
+    private void writePolylineEntity(Polyline polyline) {
+        writePolylineVertices(polyline.getVertices(), polyline.isClosed(), polyline);
     }
 
     /**
@@ -408,6 +429,110 @@ public class DxfExporter {
         }
     }
 
+    private void writeLinearDimensionEntity(LinearDimension dimension) {
+        Point first = dimension.getFirstPoint();
+        Point second = dimension.getSecondPoint();
+        Point dimStart = dimension.getDimensionStart();
+        Point text = dimension.getTextPosition();
+
+        writeGroup(0, "DIMENSION");
+        writeEntityCommon(dimension);
+        writeGroup(2, "*D0");
+        writeGroup(3, "STANDARD");
+        writeGroup(70, dimension.getOrientation() == LinearDimension.Orientation.ALIGNED ? "33" : "32");
+        writeGroup(1, encodeDxfString(dimension.hasTextOverride() ? dimension.getTextOverride() : "<>"));
+        writePoint(dimStart, 10);
+        writePoint(text, 11);
+        writePoint(first, 13);
+        writePoint(second, 14);
+        if (dimension.getOrientation() != LinearDimension.Orientation.ALIGNED) {
+            writeGroup(50, formatDouble(dimension.getOrientation() == LinearDimension.Orientation.VERTICAL ? 90.0 : 0.0));
+        }
+        writeDimensionXData(dimension);
+        writeXData("DIMTYPE", "LINEAR");
+        writeXData("ORIENTATION", dimension.getOrientation().name());
+        writeXData("DIM_LINE_X", formatDouble(dimension.getDimensionLinePoint().getX()));
+        writeXData("DIM_LINE_Y", formatDouble(dimension.getDimensionLinePoint().getY()));
+        writeXData("TEXT_FACTOR", formatDouble(dimension.getTextPositionFactor()));
+        writeXData("EXT_OFFSET", formatDouble(dimension.getExtensionLineOffset()));
+        writeXData("EXT_OVERSHOOT", formatDouble(dimension.getExtensionLineOvershoot()));
+        writeXData("DIM_EXTENSION", formatDouble(dimension.getDimensionLineExtension()));
+    }
+
+    private void writeRadialDimensionEntity(RadialDimension dimension) {
+        Point center = dimension.getCenterPoint();
+        Point attachment = dimension.getAttachmentPoint();
+        Point leader = dimension.getLeaderPoint();
+        Point text = dimension.getTextPosition();
+
+        writeGroup(0, "DIMENSION");
+        writeEntityCommon(dimension);
+        writeGroup(2, "*D0");
+        writeGroup(3, "STANDARD");
+        writeGroup(70, dimension.getKind() == RadialDimension.Kind.DIAMETER ? "35" : "36");
+        writeGroup(1, encodeDxfString(dimension.hasTextOverride() ? dimension.getTextOverride() : "<>"));
+        writePoint(attachment, 10);
+        writePoint(text, 11);
+        writePoint(center, 15);
+        writePoint(leader, 16);
+        writeDimensionXData(dimension);
+        writeXData("DIMTYPE", "RADIAL");
+        writeXData("RADIAL_KIND", dimension.getKind().name());
+        writeXData("CENTER_X", formatDouble(center.getX()));
+        writeXData("CENTER_Y", formatDouble(center.getY()));
+        writeXData("RADIUS", formatDouble(dimension.getRadiusValue()));
+        writeXData("LEADER_X", formatDouble(leader.getX()));
+        writeXData("LEADER_Y", formatDouble(leader.getY()));
+        writeXData("SHELF_SIDE", dimension.getShelfSide().name());
+    }
+
+    private void writeAngularDimensionEntity(AngularDimension dimension) {
+        Point vertex = dimension.getVertexPoint();
+        Point first = dimension.getFirstRayPoint();
+        Point second = dimension.getSecondRayPoint();
+        Point arcPoint = dimension.getArcPoint();
+        Point text = dimension.getTextPosition();
+
+        writeGroup(0, "DIMENSION");
+        writeEntityCommon(dimension);
+        writeGroup(2, "*D0");
+        writeGroup(3, "STANDARD");
+        writeGroup(70, "37");
+        writeGroup(1, encodeDxfString(dimension.hasTextOverride() ? dimension.getTextOverride() : "<>"));
+        writePoint(arcPoint, 10);
+        writePoint(text, 11);
+        writePoint(vertex, 13);
+        writePoint(first, 14);
+        writePoint(second, 15);
+        writeDimensionXData(dimension);
+        writeXData("DIMTYPE", "ANGULAR");
+        writeXData("VERTEX_X", formatDouble(vertex.getX()));
+        writeXData("VERTEX_Y", formatDouble(vertex.getY()));
+        writeXData("FIRST_X", formatDouble(first.getX()));
+        writeXData("FIRST_Y", formatDouble(first.getY()));
+        writeXData("SECOND_X", formatDouble(second.getX()));
+        writeXData("SECOND_Y", formatDouble(second.getY()));
+        writeXData("ARC_X", formatDouble(arcPoint.getX()));
+        writeXData("ARC_Y", formatDouble(arcPoint.getY()));
+    }
+
+    private void writeDimensionXData(DimensionPrimitive dimension) {
+        writeGroup(1001, APP_ID);
+        writeXData("TEXT_OVERRIDE", dimension.getTextOverride());
+        writeXData("TEXT_HEIGHT", formatDouble(dimension.getTextHeight()));
+        writeXData("TEXT_GAP", formatDouble(dimension.getTextGap()));
+        writeXData("TEXT_PLACEMENT", dimension.getTextPlacement().name());
+        writeXData("ARROW_SIZE", formatDouble(dimension.getArrowSize()));
+        writeXData("ARROW_TYPE", dimension.getArrowType().name());
+        writeXData("FILLED_ARROWS", Boolean.toString(dimension.isFilledArrows()));
+        writeXData("FONT_VARIANT", dimension.getFontVariant().name());
+        writeXData("TEXT_FONT", dimension.getTextFont());
+    }
+
+    private void writeXData(String key, String value) {
+        writeGroup(1000, encodeDxfString(key + "=" + (value != null ? value : "")));
+    }
+
     private boolean isGeometryStyled(LineStyle style) {
         return style != null && (style.getType() == LineType.WAVY || style.getType() == LineType.ZIGZAG);
     }
@@ -418,6 +543,7 @@ public class DxfExporter {
             case SEGMENT -> new PathGeometry(List.of(
                     ((Segment) primitive).getStartPoint(),
                     ((Segment) primitive).getEndPoint()), false);
+            case POLYLINE -> new PathGeometry(((Polyline) primitive).getVertices(), ((Polyline) primitive).isClosed());
             case CIRCLE -> new PathGeometry(sampleCircle((Circle) primitive, 180), true);
             case ARC -> new PathGeometry(sampleArc((Arc) primitive, 96), false);
             case ELLIPSE -> new PathGeometry(approximateEllipse((Ellipse) primitive, 180), true);
@@ -874,6 +1000,39 @@ public class DxfExporter {
         writeGroup(70, String.valueOf(flags));
         writeGroup(62, String.valueOf(color));
         writeGroup(6, normalizeLinetypeName(layer.getLinetypeName()));
+    }
+
+    private void writeTextStyle() {
+        writeGroup(0, "STYLE");
+        writeGroup(2, "STANDARD");
+        writeGroup(70, "0");
+        writeGroup(40, formatDouble(0.0));
+        writeGroup(41, formatDouble(1.0));
+        writeGroup(50, formatDouble(0.0));
+        writeGroup(71, "0");
+        writeGroup(42, formatDouble(2.5));
+        writeGroup(3, "Arial");
+        writeGroup(4, "");
+    }
+
+    private void writeDimensionStyle() {
+        writeGroup(0, "DIMSTYLE");
+        writeGroup(2, "STANDARD");
+        writeGroup(70, "0");
+        writeGroup(3, "");
+        writeGroup(4, "");
+        writeGroup(5, "");
+        writeGroup(6, "");
+        writeGroup(7, "");
+        writeGroup(40, formatDouble(1.0));
+        writeGroup(41, formatDouble(6.0));
+        writeGroup(140, formatDouble(12.0));
+    }
+
+    private void writeAppId() {
+        writeGroup(0, "APPID");
+        writeGroup(2, APP_ID);
+        writeGroup(70, "0");
     }
 
     private void writeEof() {

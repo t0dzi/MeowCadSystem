@@ -341,7 +341,11 @@ public class DrawingState {
     }
 
     public void setRectangleCornerType(Rectangle.CornerType type) {
-        rectangleCornerType.set(type);
+        Rectangle.CornerType resolvedType = type != null ? type : Rectangle.CornerType.SHARP;
+        rectangleCornerType.set(resolvedType);
+        if (resolvedType == Rectangle.CornerType.SHARP) {
+            setRectangleCornerRadius(0);
+        }
     }
 
     public ObjectProperty<Rectangle.CornerType> rectangleCornerTypeProperty() {
@@ -538,8 +542,8 @@ public class DrawingState {
             case DIMENSION_ANGLE ->
                     switch (collected) {
                         case 0 -> "Укажите вершину угла";
-                        case 1 -> "Укажите первую точку на луче";
-                        case 2 -> "Укажите вторую точку на луче";
+                        case 1 -> "Укажите первую точку на луче. Ctrl+клик по линии - выбрать линию";
+                        case 2 -> "Укажите вторую точку на луче. Ctrl+клик по линии - выбрать линию";
                         default -> "Укажите положение дуги размера";
                     };
         };

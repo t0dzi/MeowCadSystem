@@ -107,7 +107,7 @@ public class SnapManager {
 
         try {
             for (Primitive primitive : model.getPrimitives()) {
-                if (primitive != null) {
+                if (primitive != null && model.isPrimitiveLayerVisible(primitive)) {
                     collectSnapPoints(primitive, candidates);
                 }
             }
@@ -183,6 +183,7 @@ public class SnapManager {
     private void collectSnapPoints(Primitive primitive, List<SnapPoint> points) {
         switch (primitive.getType()) {
             case SEGMENT -> collectSegmentSnaps((Segment) primitive, points);
+            case POLYLINE -> collectPolylineSnaps((Polyline) primitive, points);
             case CIRCLE -> collectCircleSnaps((Circle) primitive, points);
             case ARC -> collectArcSnaps((Arc) primitive, points);
             case RECTANGLE -> collectRectangleSnaps((Rectangle) primitive, points);
@@ -246,6 +247,27 @@ public class SnapManager {
         points.add(new SnapPoint(new Point(c.getX() - r, c.getY()), SnapType.ENDPOINT, circle));
         points.add(new SnapPoint(new Point(c.getX(), c.getY() + r), SnapType.ENDPOINT, circle));
         points.add(new SnapPoint(new Point(c.getX(), c.getY() - r), SnapType.ENDPOINT, circle));
+    }
+
+    private void collectPolylineSnaps(Polyline polyline, List<SnapPoint> points) {
+        List<Point> vertices = polyline.getVertices();
+        if (vertices.isEmpty()) {
+            return;
+        }
+
+        for (Point vertex : vertices) {
+            points.add(new SnapPoint(vertex, SnapType.ENDPOINT, polyline));
+        }
+
+        int segmentCount = polyline.isClosed() ? vertices.size() : vertices.size() - 1;
+        for (int i = 0; i < segmentCount; i++) {
+            Point start = vertices.get(i);
+            Point end = vertices.get((i + 1) % vertices.size());
+            points.add(new SnapPoint(new Point(
+                    (start.getX() + end.getX()) / 2.0,
+                    (start.getY() + end.getY()) / 2.0),
+                    SnapType.MIDPOINT, polyline));
+        }
     }
 
     private void collectArcSnaps(Arc arc, List<SnapPoint> points) {
@@ -336,6 +358,9 @@ public class SnapManager {
             for (int j = i + 1; j < primitives.size(); j++) {
                 Primitive p1 = primitives.get(i);
                 Primitive p2 = primitives.get(j);
+                if (!model.isPrimitiveLayerVisible(p1) || !model.isPrimitiveLayerVisible(p2)) {
+                    continue;
+                }
 
                 List<Point> intersections = findIntersections(p1, p2);
                 for (Point intersection : intersections) {
@@ -606,6 +631,12 @@ public class SnapManager {
 
         if (p instanceof Segment seg) {
             segments.add(seg);
+        } else if (p instanceof Polyline polyline) {
+            List<Point> vertices = polyline.getVertices();
+            int segmentCount = polyline.isClosed() ? vertices.size() : vertices.size() - 1;
+            for (int i = 0; i < segmentCount; i++) {
+                segments.add(createTempSegment(vertices.get(i), vertices.get((i + 1) % vertices.size())));
+            }
         } else if (p instanceof Rectangle rect) {
             Point[] corners = rect.getCorners();
             for (int i = 0; i < corners.length; i++) {
@@ -894,6 +925,10 @@ public class SnapManager {
             Point p = perpendicularToSegment(fromPoint, segment);
             if (p != null)
                 result.add(p);
+        } else if (primitive instanceof Polyline polyline) {
+            Point p = perpendicularToPolyline(fromPoint, polyline);
+            if (p != null)
+                result.add(p);
         } else if (primitive instanceof Circle circle) {
             result.addAll(perpendicularToCircleFromPoint(fromPoint, circle));
         } else if (primitive instanceof Ellipse ellipse) {
@@ -968,6 +1003,27 @@ public class SnapManager {
             return null;
 
         return new Point(p1.getX() + t * dx, p1.getY() + t * dy);
+    }
+
+    private Point perpendicularToPolyline(Point cursor, Polyline polyline) {
+        List<Point> vertices = polyline.getVertices();
+        int segmentCount = polyline.isClosed() ? vertices.size() : vertices.size() - 1;
+        Point bestPoint = null;
+        double bestDistance = Double.MAX_VALUE;
+
+        for (int i = 0; i < segmentCount; i++) {
+            Segment segment = createTempSegment(vertices.get(i), vertices.get((i + 1) % vertices.size()));
+            Point perpendicular = perpendicularToSegment(cursor, segment);
+            if (perpendicular != null) {
+                double distance = distance(cursor, perpendicular);
+                if (distance < bestDistance) {
+                    bestDistance = distance;
+                    bestPoint = perpendicular;
+                }
+            }
+        }
+
+        return bestPoint;
     }
 
     private Point perpendicularToEllipse(Point cursor, Ellipse ellipse) {

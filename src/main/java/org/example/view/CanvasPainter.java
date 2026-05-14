@@ -33,6 +33,9 @@ public class CanvasPainter {
 
     private SnapPoint currentSnapPoint;
 
+    private Point rubberBandStart; // screen coords
+    private Point rubberBandEnd;   // screen coords
+
     /** Количество сегментов для аппроксимации кривых */
     private static final int CURVE_SEGMENTS = 64;
 
@@ -49,6 +52,11 @@ public class CanvasPainter {
 
     public void setCurrentSnapPoint(SnapPoint snapPoint) {
         this.currentSnapPoint = snapPoint;
+    }
+
+    public void setRubberBand(Point start, Point end) {
+        this.rubberBandStart = start;
+        this.rubberBandEnd = end;
     }
 
     public Point toScreen(Point worldPoint) {
@@ -182,7 +190,10 @@ public class CanvasPainter {
         gc.setLineJoin(javafx.scene.shape.StrokeLineJoin.ROUND);
 
         for (Primitive primitive : model.getPrimitives()) {
-            boolean isSelected = primitive == model.getSelectedPrimitive();
+            if (!model.isPrimitiveLayerVisible(primitive)) {
+                continue;
+            }
+            boolean isSelected = model.isPrimitiveSelected(primitive);
             drawPrimitive(primitive, isSelected);
         }
 
@@ -195,11 +206,15 @@ public class CanvasPainter {
         drawAxes();
 
         Primitive selected = model.getSelectedPrimitive();
-        if (selected != null) {
+        if (selected != null && model.getSelectedPrimitives().size() == 1) {
             drawControlPoints(selected);
         }
 
         drawCurrentSnapPoint();
+
+        if (rubberBandStart != null && rubberBandEnd != null) {
+            drawRubberBand(rubberBandStart, rubberBandEnd);
+        }
     }
 
     private void drawCurrentSnapPoint() {
@@ -213,6 +228,38 @@ public class CanvasPainter {
         gc.setGlobalAlpha(1.0);
 
         drawSnapPoint(currentSnapPoint);
+    }
+
+    private void drawRubberBand(Point start, Point end) {
+        double x1 = Math.min(start.getX(), end.getX());
+        double y1 = Math.min(start.getY(), end.getY());
+        double x2 = Math.max(start.getX(), end.getX());
+        double y2 = Math.max(start.getY(), end.getY());
+        double w = x2 - x1;
+        double h = y2 - y1;
+        if (w < 1 || h < 1) return;
+
+        boolean windowSelect = end.getX() >= start.getX(); // left-to-right = window (solid blue)
+
+        gc.save();
+        gc.setLineWidth(1.0);
+        gc.setLineDashes((double[]) null);
+        gc.setLineJoin(javafx.scene.shape.StrokeLineJoin.MITER);
+        gc.setLineCap(javafx.scene.shape.StrokeLineCap.SQUARE);
+
+        if (windowSelect) {
+            gc.setStroke(javafx.scene.paint.Color.BLUE);
+            gc.setFill(javafx.scene.paint.Color.rgb(0, 60, 255, 0.08));
+        } else {
+            gc.setLineDashes(5, 5);
+            gc.setStroke(javafx.scene.paint.Color.web("#00aa00"));
+            gc.setFill(javafx.scene.paint.Color.rgb(0, 180, 0, 0.08));
+        }
+
+        gc.setGlobalAlpha(1.0);
+        gc.fillRect(x1, y1, w, h);
+        gc.strokeRect(x1, y1, w, h);
+        gc.restore();
     }
 
     private void drawPreview() {
@@ -1292,10 +1339,7 @@ public class CanvasPainter {
             gc.setStroke(Color.ORANGERED);
         } else {
             // Используем ACI-цвет, если он задан на примитиве
-            Color aciColor = primitive.getColorAci() >= 1
-                    ? resolveAciStrokeColor(primitive.getColorAci())
-                    : null;
-            gc.setStroke(aciColor != null ? aciColor : settings.getSegmentColor());
+            gc.setStroke(resolvePrimitiveStrokeColor(primitive));
         }
 
         LineStyle style = primitive.getLineStyle();
@@ -1310,6 +1354,7 @@ public class CanvasPainter {
         switch (primitive.getType()) {
             case POINT   -> drawPoint((PointPrimitive) primitive);
             case SEGMENT -> drawSegment((Segment) primitive);
+            case POLYLINE -> drawPolyline((Polyline) primitive);
             case CIRCLE  -> drawCircle((Circle) primitive);
             case ARC     -> drawArc((Arc) primitive);
             case RECTANGLE -> drawRectangle((Rectangle) primitive);
@@ -1331,6 +1376,29 @@ public class CanvasPainter {
             return luminance >= 0.5 ? Color.BLACK : Color.WHITE;
         }
         return org.example.export.DxfImporter.aciToColor(aci);
+    }
+
+    private Color resolvePrimitiveStrokeColor(Primitive primitive) {
+        int explicitColor = primitive.getColorAci();
+        if (explicitColor >= 1) {
+            Color color = resolveAciStrokeColor(explicitColor);
+            if (color != null) {
+                return color;
+            }
+        }
+
+        Layer layer = model.getLayer(primitive.getLayerName());
+        if (layer != null) {
+            if (Layer.DEFAULT_LAYER_NAME.equals(layer.getName())) {
+                return settings.getSegmentColor();
+            }
+            Color layerColor = resolveAciStrokeColor(layer.getColorIndex());
+            if (layerColor != null) {
+                return layerColor;
+            }
+        }
+
+        return settings.getSegmentColor();
     }
 
 
@@ -2130,6 +2198,142 @@ public class CanvasPainter {
             gc.closePath();
             gc.stroke();
         }
+    }
+
+    private void drawPolyline(Polyline polyline) {
+        List<Point> vertices = polyline.getVertices();
+        if (vertices.size() < 2) {
+            return;
+        }
+
+        LineStyle style = polyline.getLineStyle();
+        if (style != null && style.getType() == LineType.WAVY) {
+            drawPolylineWavy(vertices, polyline.isClosed(), style);
+            return;
+        }
+        if (style != null && style.getType() == LineType.ZIGZAG) {
+            drawPolylineZigzag(vertices, polyline.isClosed(), style);
+            return;
+        }
+
+        drawPlainPolyline(vertices, polyline.isClosed());
+    }
+
+    private void drawPlainPolyline(List<Point> vertices, boolean closed) {
+        gc.beginPath();
+        Point first = toScreen(vertices.get(0));
+        gc.moveTo(first.getX(), first.getY());
+        for (int i = 1; i < vertices.size(); i++) {
+            Point screenPoint = toScreen(vertices.get(i));
+            gc.lineTo(screenPoint.getX(), screenPoint.getY());
+        }
+        if (closed) {
+            gc.closePath();
+        }
+        gc.stroke();
+    }
+
+    private void drawPolylineWavy(List<Point> vertices, boolean closed, LineStyle style) {
+        List<Point> screenPoints = buildScreenPolylinePoints(vertices, closed);
+        double[] lengths = buildPolylineLengths(screenPoints);
+        double totalLength = lengths[lengths.length - 1];
+        if (totalLength < 1.0) {
+            drawPlainPolyline(vertices, closed);
+            return;
+        }
+
+        double amplitude = style.getWaveAmplitude() * camera.getScale();
+        double waveLength = Math.max(4.0, style.getWaveLength() * camera.getScale());
+        int periods = closed
+                ? Math.max(3, (int) Math.round(totalLength / waveLength))
+                : Math.max(1, (int) Math.round(totalLength / waveLength));
+        int samples = Math.max(vertices.size() * 24, periods * 24);
+
+        strokeOffsetPolyline(screenPoints, lengths, closed, samples,
+                distance -> amplitude * Math.sin((distance / totalLength) * periods * 2 * Math.PI));
+    }
+
+    private void drawPolylineZigzag(List<Point> vertices, boolean closed, LineStyle style) {
+        List<Point> screenPoints = buildScreenPolylinePoints(vertices, closed);
+        double[] lengths = buildPolylineLengths(screenPoints);
+        double totalLength = lengths[lengths.length - 1];
+        if (totalLength < 1.0) {
+            drawPlainPolyline(vertices, closed);
+            return;
+        }
+
+        double[] params = style.getDashPattern();
+        double height = params != null && params.length >= 1 ? params[0] * camera.getScale() : 8.0 * camera.getScale();
+        double width = params != null && params.length >= 2 ? params[1] * camera.getScale() : 10.0 * camera.getScale();
+        int preferredCount = params != null && params.length >= 3 ? Math.max(1, (int) params[2]) : 0;
+        int autoCount = Math.max(1, (int) Math.round(totalLength / Math.max(2.0 * width, 1.0)));
+        int periods = Math.max(Math.max(preferredCount, 1), autoCount);
+        int samples = Math.max(vertices.size() * 16, periods * 10);
+
+        strokeOffsetPolyline(screenPoints, lengths, closed, samples,
+                distance -> height * triangleWave(periods * distance / totalLength));
+    }
+
+    private List<Point> buildScreenPolylinePoints(List<Point> vertices, boolean closed) {
+        List<Point> screenPoints = new java.util.ArrayList<>(vertices.size() + (closed ? 1 : 0));
+        for (Point vertex : vertices) {
+            screenPoints.add(toScreen(vertex));
+        }
+        if (closed && !vertices.isEmpty()) {
+            screenPoints.add(toScreen(vertices.get(0)));
+        }
+        return screenPoints;
+    }
+
+    private double[] buildPolylineLengths(List<Point> screenPoints) {
+        double[] lengths = new double[screenPoints.size()];
+        lengths[0] = 0.0;
+        for (int i = 1; i < screenPoints.size(); i++) {
+            Point previous = screenPoints.get(i - 1);
+            Point current = screenPoints.get(i);
+            double dx = current.getX() - previous.getX();
+            double dy = current.getY() - previous.getY();
+            lengths[i] = lengths[i - 1] + Math.sqrt(dx * dx + dy * dy);
+        }
+        return lengths;
+    }
+
+    private void strokeOffsetPolyline(List<Point> screenPoints, double[] lengths, boolean closed, int samples,
+            java.util.function.DoubleUnaryOperator offsetFunction) {
+        double totalLength = lengths[lengths.length - 1];
+        if (totalLength < 1e-9) {
+            return;
+        }
+
+        gc.beginPath();
+        int pointCount = closed ? samples : samples + 1;
+        for (int i = 0; i < pointCount; i++) {
+            double distance = totalLength * i / samples;
+            double[] point = pointOnPolyline(screenPoints, lengths, distance);
+            double offset = offsetFunction.applyAsDouble(distance);
+            double x = point[0] + offset * point[2];
+            double y = point[1] + offset * point[3];
+            if (i == 0) {
+                gc.moveTo(x, y);
+            } else {
+                gc.lineTo(x, y);
+            }
+        }
+        if (closed) {
+            gc.closePath();
+        }
+        gc.stroke();
+    }
+
+    private double triangleWave(double phase) {
+        double normalized = phase - Math.floor(phase);
+        if (normalized < 0.25) {
+            return normalized * 4.0;
+        }
+        if (normalized < 0.75) {
+            return 2.0 - normalized * 4.0;
+        }
+        return normalized * 4.0 - 4.0;
     }
 
     private void drawPolygon(Polygon polygon) {

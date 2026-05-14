@@ -7,6 +7,7 @@ import org.example.model.Layer;
 import org.example.model.LineStyle;
 import org.example.model.LineType;
 import org.example.model.Point;
+import org.example.model.Polyline;
 import org.example.model.Segment;
 import org.example.model.Spline;
 import org.junit.jupiter.api.Test;
@@ -125,6 +126,27 @@ class DxfExporterTest {
         assertTrue(zigzagLinetype.contains("\n 73\n0\n"));
         assertFalse(wavesLinetype.contains("\n 49\n"));
         assertFalse(zigzagLinetype.contains("\n 49\n"));
+    }
+
+    @Test
+    void exportsPolylineAsLwPolylineInModernDxf() throws Exception {
+        CadModel model = new CadModel();
+        LineStyle style = new LineStyle("Solid", 1.0, null, false, LineType.SOLID);
+        Polyline polyline = new Polyline(List.of(
+                new Point(0, 0),
+                new Point(10, 0),
+                new Point(10, 5)), false, style);
+        model.addPrimitive(polyline);
+
+        Path file = Files.createTempFile("export-polyline-", ".dxf");
+        new DxfExporter(DxfExporter.DxfVersion.R2007, DxfExporter.DxfUnits.MILLIMETERS)
+                .export(model, file.toFile());
+
+        String dxf = Files.readString(file, StandardCharsets.UTF_8).replace("\r\n", "\n");
+
+        assertTrue(dxf.contains("\nLWPOLYLINE\n"));
+        assertTrue(dxf.contains("\n 90\n3\n"));
+        assertTrue(dxf.contains("\n 70\n0\n"));
     }
 
     private String extractLinetypeRecord(String dxf, String name) {

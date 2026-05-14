@@ -8,6 +8,9 @@ public class DimensionAnchor {
         FIXED,
         CONTROL_POINT,
         SEGMENT_MIDPOINT,
+        SEGMENT_PARAMETRIC,
+        POLYLINE_SEGMENT_MIDPOINT,
+        POLYLINE_SEGMENT_PARAMETRIC,
         ARC_MIDPOINT,
         RECTANGLE_EDGE_MIDPOINT,
         POLYGON_EDGE_MIDPOINT,
@@ -19,12 +22,18 @@ public class DimensionAnchor {
     private Primitive primitive;
     private Type type;
     private int index;
+    private double parameter;
     private Point fixedPoint;
 
     private DimensionAnchor(Primitive primitive, Type type, int index, Point fixedPoint) {
+        this(primitive, type, index, 0.0, fixedPoint);
+    }
+
+    private DimensionAnchor(Primitive primitive, Type type, int index, double parameter, Point fixedPoint) {
         this.primitive = primitive;
         this.type = type;
         this.index = index;
+        this.parameter = parameter;
         this.fixedPoint = fixedPoint;
     }
 
@@ -34,6 +43,14 @@ public class DimensionAnchor {
 
     public static DimensionAnchor controlPoint(Primitive primitive, int controlPointIndex, Point fallbackPoint) {
         return new DimensionAnchor(primitive, Type.CONTROL_POINT, controlPointIndex, fallbackPoint);
+    }
+
+    public static DimensionAnchor parametricSegmentPoint(Segment segment, double parameter, Point fallbackPoint) {
+        return new DimensionAnchor(segment, Type.SEGMENT_PARAMETRIC, -1, clamp(parameter), fallbackPoint);
+    }
+
+    public static DimensionAnchor parametricPolylinePoint(Polyline polyline, int segmentIndex, double parameter, Point fallbackPoint) {
+        return new DimensionAnchor(polyline, Type.POLYLINE_SEGMENT_PARAMETRIC, segmentIndex, clamp(parameter), fallbackPoint);
     }
 
     public static DimensionAnchor fromSnapPoint(SnapPoint snapPoint) {
@@ -49,6 +66,7 @@ public class DimensionAnchor {
         Point snapPosition = snapPoint.getPosition();
         return switch (primitive.getType()) {
             case SEGMENT -> fromSegmentSnap((Segment) primitive, snapPoint.getType(), snapPosition);
+            case POLYLINE -> fromPolylineSnap((Polyline) primitive, snapPoint.getType(), snapPosition);
             case CIRCLE -> fromCircleSnap((Circle) primitive, snapPoint.getType(), snapPosition);
             case ARC -> fromArcSnap((Arc) primitive, snapPoint.getType(), snapPosition);
             case RECTANGLE -> fromRectangleSnap((Rectangle) primitive, snapPoint.getType(), snapPosition);
@@ -67,6 +85,9 @@ public class DimensionAnchor {
         return switch (type) {
             case CONTROL_POINT -> resolveControlPoint();
             case SEGMENT_MIDPOINT -> resolveSegmentMidpoint();
+            case SEGMENT_PARAMETRIC -> resolveSegmentParametricPoint();
+            case POLYLINE_SEGMENT_MIDPOINT -> resolvePolylineSegmentMidpoint();
+            case POLYLINE_SEGMENT_PARAMETRIC -> resolvePolylineSegmentParametricPoint();
             case ARC_MIDPOINT -> resolveArcMidpoint();
             case RECTANGLE_EDGE_MIDPOINT -> resolveRectangleEdgeMidpoint();
             case POLYGON_EDGE_MIDPOINT -> resolvePolygonEdgeMidpoint();
@@ -133,6 +154,45 @@ public class DimensionAnchor {
             return fixedPoint;
         }
         return midpoint(segment.getStartPoint(), segment.getEndPoint());
+    }
+
+    private Point resolveSegmentParametricPoint() {
+        if (!(primitive instanceof Segment segment)) {
+            return fixedPoint;
+        }
+        return interpolate(segment.getStartPoint(), segment.getEndPoint(), parameter);
+    }
+
+    private Point resolvePolylineSegmentMidpoint() {
+        if (!(primitive instanceof Polyline polyline)) {
+            return fixedPoint;
+        }
+
+        List<Point> vertices = polyline.getVertices();
+        int segmentCount = polyline.isClosed() ? vertices.size() : vertices.size() - 1;
+        if (index < 0 || index >= segmentCount) {
+            return fixedPoint;
+        }
+
+        Point start = vertices.get(index);
+        Point end = vertices.get((index + 1) % vertices.size());
+        return midpoint(start, end);
+    }
+
+    private Point resolvePolylineSegmentParametricPoint() {
+        if (!(primitive instanceof Polyline polyline)) {
+            return fixedPoint;
+        }
+
+        List<Point> vertices = polyline.getVertices();
+        int segmentCount = polyline.isClosed() ? vertices.size() : vertices.size() - 1;
+        if (index < 0 || index >= segmentCount) {
+            return fixedPoint;
+        }
+
+        Point start = vertices.get(index);
+        Point end = vertices.get((index + 1) % vertices.size());
+        return interpolate(start, end, parameter);
     }
 
     private Point resolveArcMidpoint() {
@@ -212,6 +272,19 @@ public class DimensionAnchor {
         if (snapType == SnapType.ENDPOINT) {
             int cpIndex = nearestControlPointIndex(segment, snapPosition, 0, 1);
             return controlPoint(segment, cpIndex, snapPosition);
+        }
+        return fixed(snapPosition);
+    }
+
+    private static DimensionAnchor fromPolylineSnap(Polyline polyline, SnapType snapType, Point snapPosition) {
+        if (snapType == SnapType.ENDPOINT) {
+            int cpIndex = nearestControlPointIndex(polyline, snapPosition,
+                    buildControlPointIndexRange(polyline.getVertexCount()));
+            return controlPoint(polyline, cpIndex, snapPosition);
+        }
+        if (snapType == SnapType.MIDPOINT) {
+            int segmentIndex = nearestPolylineSegmentIndex(polyline, snapPosition);
+            return new DimensionAnchor(polyline, Type.POLYLINE_SEGMENT_MIDPOINT, segmentIndex, snapPosition);
         }
         return fixed(snapPosition);
     }
@@ -393,6 +466,32 @@ public class DimensionAnchor {
         return bestIndex;
     }
 
+    private static int nearestPolylineSegmentIndex(Polyline polyline, Point target) {
+        List<Point> vertices = polyline.getVertices();
+        int segmentCount = polyline.isClosed() ? vertices.size() : vertices.size() - 1;
+        double bestDistance = Double.MAX_VALUE;
+        int bestIndex = 0;
+
+        for (int i = 0; i < segmentCount; i++) {
+            Point midpoint = midpoint(vertices.get(i), vertices.get((i + 1) % vertices.size()));
+            double distance = distance(midpoint, target);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestIndex = i;
+            }
+        }
+
+        return bestIndex;
+    }
+
+    private static int[] buildControlPointIndexRange(int count) {
+        int[] indices = new int[count];
+        for (int i = 0; i < count; i++) {
+            indices[i] = i;
+        }
+        return indices;
+    }
+
     private static int nearestSplineSegmentMidpointIndex(Spline spline, Point target) {
         double bestDistance = Double.MAX_VALUE;
         int bestIndex = 0;
@@ -413,9 +512,19 @@ public class DimensionAnchor {
                 (p1.getY() + p2.getY()) / 2.0);
     }
 
+    private static Point interpolate(Point p1, Point p2, double t) {
+        return new Point(
+                p1.getX() + (p2.getX() - p1.getX()) * t,
+                p1.getY() + (p2.getY() - p1.getY()) * t);
+    }
+
     private static double distance(Point p1, Point p2) {
         double dx = p2.getX() - p1.getX();
         double dy = p2.getY() - p1.getY();
         return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    private static double clamp(double value) {
+        return Math.max(0.0, Math.min(1.0, value));
     }
 }

@@ -315,6 +315,7 @@ public class DxfImporter {
             case "POLYLINE"   -> { return parsePOLYLINE(pairs, i, result); }
             case "SPLINE"     -> { return parseSpline(pairs, i, result); }
             case "POINT"      -> { return parsePoint(pairs, i, result); }
+            case "DIMENSION"  -> { return parseDimension(pairs, i, result); }
             default -> {
                 result.skippedEntities++;
                 return findEntityEnd(pairs, i);
@@ -392,6 +393,202 @@ public class DxfImporter {
         int effectiveColorIndex = resolveEffectiveColorIndex(common, result);
         if (effectiveColorIndex >= 1 && effectiveColorIndex <= 255) {
             p.setColorAci(effectiveColorIndex);
+        }
+    }
+
+    private int parseDimension(List<String[]> pairs, int i, ImportResult result) {
+        int end = findEntityEnd(pairs, i);
+        EntityCommon common = readCommon(pairs, i, end);
+        Map<String, String> data = readDimensionXData(pairs, i, end);
+
+        int flags = 0;
+        String textOverride = "";
+        Point definitionPoint = new Point(0, 0);
+        Point textPoint = null;
+        Point p13 = null;
+        Point p14 = null;
+        Point p15 = null;
+        Point p16 = null;
+        double rotation = 0.0;
+
+        for (int j = i; j < end; j++) {
+            String code = pairs.get(j)[0];
+            String value = pairs.get(j)[1];
+            switch (code) {
+                case "1" -> textOverride = "<>".equals(value) ? "" : value;
+                case "10" -> definitionPoint = new Point(parseDoubleSafe(value), pointY(pairs, j, definitionPoint.getY()));
+                case "11" -> textPoint = new Point(parseDoubleSafe(value), pointY(pairs, j, 0.0));
+                case "13" -> p13 = new Point(parseDoubleSafe(value), pointY(pairs, j, 0.0));
+                case "14" -> p14 = new Point(parseDoubleSafe(value), pointY(pairs, j, 0.0));
+                case "15" -> p15 = new Point(parseDoubleSafe(value), pointY(pairs, j, 0.0));
+                case "16" -> p16 = new Point(parseDoubleSafe(value), pointY(pairs, j, 0.0));
+                case "50" -> rotation = parseDoubleSafe(value);
+                case "70" -> flags = parseIntSafe(value, 0);
+            }
+        }
+
+        DimensionPrimitive dimension = buildDimension(flags, data, definitionPoint, textPoint,
+                p13, p14, p15, p16, rotation);
+        if (dimension == null) {
+            result.skippedEntities++;
+            return end;
+        }
+
+        applyCommon(dimension, common, result);
+        applyDimensionSettings(dimension, data, textOverride, textPoint);
+        result.primitives.add(dimension);
+        return end;
+    }
+
+    private DimensionPrimitive buildDimension(int flags, Map<String, String> data, Point definitionPoint,
+                                              Point textPoint, Point p13, Point p14, Point p15, Point p16,
+                                              double rotation) {
+        String exportedType = data.get("DIMTYPE");
+        int baseType = flags & 7;
+
+        if ("LINEAR".equals(exportedType) || baseType == 0 || baseType == 1) {
+            Point first = p13 != null ? p13 : new Point(0, 0);
+            Point second = p14 != null ? p14 : definitionPoint;
+            Point dimLine = pointFromData(data, "DIM_LINE_X", "DIM_LINE_Y", definitionPoint);
+            LinearDimension.Orientation orientation = parseEnum(data.get("ORIENTATION"),
+                    inferLinearOrientation(baseType, rotation));
+            LinearDimension dimension = new LinearDimension(
+                    DimensionAnchor.fixed(first),
+                    DimensionAnchor.fixed(second),
+                    dimLine,
+                    orientation,
+                    styleManager.getDefaultStyle());
+            if (data.containsKey("TEXT_FACTOR")) {
+                dimension.setTextPositionFactor(parseDoubleSafe(data.get("TEXT_FACTOR")));
+            } else if (textPoint != null) {
+                dimension.setTextPosition(textPoint);
+            }
+            dimension.setExtensionLineOffset(parseDoubleSafe(data.getOrDefault("EXT_OFFSET", "0")));
+            dimension.setExtensionLineOvershoot(parseDoubleSafe(data.getOrDefault("EXT_OVERSHOOT", "8")));
+            dimension.setDimensionLineExtension(parseDoubleSafe(data.getOrDefault("DIM_EXTENSION", "0")));
+            return dimension;
+        }
+
+        if ("RADIAL".equals(exportedType) || baseType == 3 || baseType == 4) {
+            Point center = pointFromData(data, "CENTER_X", "CENTER_Y", p15 != null ? p15 : new Point(0, 0));
+            Point leader = pointFromData(data, "LEADER_X", "LEADER_Y", p16 != null ? p16 : definitionPoint);
+            double radius = parseDoubleSafe(data.getOrDefault("RADIUS", "0"));
+            if (radius <= 0.0) {
+                radius = Math.max(distance(center, definitionPoint), 1.0);
+            }
+            Circle reference = new Circle(center, radius, styleManager.getDefaultStyle());
+            RadialDimension.Kind kind = parseEnum(data.get("RADIAL_KIND"),
+                    baseType == 3 ? RadialDimension.Kind.DIAMETER : RadialDimension.Kind.RADIUS);
+            RadialDimension dimension = new RadialDimension(reference, leader, kind, styleManager.getDefaultStyle());
+            dimension.setShelfSide(parseEnum(data.get("SHELF_SIDE"), RadialDimension.ShelfSide.ALONG_LINE));
+            if (textPoint != null) {
+                dimension.setTextPosition(textPoint);
+            }
+            return dimension;
+        }
+
+        if ("ANGULAR".equals(exportedType) || baseType == 2 || baseType == 5) {
+            Point vertex = pointFromData(data, "VERTEX_X", "VERTEX_Y", p13 != null ? p13 : new Point(0, 0));
+            Point first = pointFromData(data, "FIRST_X", "FIRST_Y", p14 != null ? p14 : new Point(vertex.getX() + 1, vertex.getY()));
+            Point second = pointFromData(data, "SECOND_X", "SECOND_Y", p15 != null ? p15 : new Point(vertex.getX(), vertex.getY() + 1));
+            Point arcPoint = pointFromData(data, "ARC_X", "ARC_Y", definitionPoint);
+            AngularDimension dimension = new AngularDimension(
+                    DimensionAnchor.fixed(vertex),
+                    DimensionAnchor.fixed(first),
+                    DimensionAnchor.fixed(second),
+                    arcPoint,
+                    styleManager.getDefaultStyle());
+            if (textPoint != null) {
+                dimension.setTextPosition(textPoint);
+            }
+            return dimension;
+        }
+
+        return null;
+    }
+
+    private Map<String, String> readDimensionXData(List<String[]> pairs, int start, int end) {
+        Map<String, String> data = new LinkedHashMap<>();
+        boolean inCadSystemData = false;
+        for (int i = start; i < end; i++) {
+            String code = pairs.get(i)[0];
+            String value = pairs.get(i)[1];
+            if ("1001".equals(code)) {
+                inCadSystemData = "CADSYSTEM".equalsIgnoreCase(value);
+                continue;
+            }
+            if (inCadSystemData && "1000".equals(code)) {
+                int separator = value.indexOf('=');
+                if (separator > 0) {
+                    data.put(value.substring(0, separator), value.substring(separator + 1));
+                }
+            }
+        }
+        return data;
+    }
+
+    private void applyDimensionSettings(DimensionPrimitive dimension, Map<String, String> data,
+                                        String entityTextOverride, Point textPoint) {
+        String textOverride = data.getOrDefault("TEXT_OVERRIDE", entityTextOverride);
+        if (textOverride != null && !textOverride.isBlank() && !"<>".equals(textOverride)) {
+            dimension.setTextOverride(textOverride);
+        }
+        if (data.containsKey("TEXT_HEIGHT")) {
+            dimension.setTextHeight(parseDoubleSafe(data.get("TEXT_HEIGHT")));
+        }
+        if (data.containsKey("TEXT_GAP")) {
+            dimension.setTextGap(parseDoubleSafe(data.get("TEXT_GAP")));
+        }
+        if (data.containsKey("ARROW_SIZE")) {
+            dimension.setArrowSize(parseDoubleSafe(data.get("ARROW_SIZE")));
+        }
+        dimension.setTextPlacement(parseEnum(data.get("TEXT_PLACEMENT"), dimension.getTextPlacement()));
+        dimension.setArrowType(parseEnum(data.get("ARROW_TYPE"), dimension.getArrowType()));
+        dimension.setFontVariant(parseEnum(data.get("FONT_VARIANT"), dimension.getFontVariant()));
+        if (data.containsKey("FILLED_ARROWS")) {
+            dimension.setFilledArrows(Boolean.parseBoolean(data.get("FILLED_ARROWS")));
+        }
+        if (data.containsKey("TEXT_FONT")) {
+            dimension.setTextFont(data.get("TEXT_FONT"));
+        }
+        if (textPoint != null && !dimension.isTextPositionManuallyMoved()) {
+            dimension.setTextPosition(textPoint);
+        }
+    }
+
+    private LinearDimension.Orientation inferLinearOrientation(int baseType, double rotation) {
+        if (baseType == 1) {
+            return LinearDimension.Orientation.ALIGNED;
+        }
+        double normalized = Math.abs(rotation % 180.0);
+        return Math.abs(normalized - 90.0) < 1e-6
+                ? LinearDimension.Orientation.VERTICAL
+                : LinearDimension.Orientation.HORIZONTAL;
+    }
+
+    private Point pointFromData(Map<String, String> data, String xKey, String yKey, Point fallback) {
+        if (data.containsKey(xKey) && data.containsKey(yKey)) {
+            return new Point(parseDoubleSafe(data.get(xKey)), parseDoubleSafe(data.get(yKey)));
+        }
+        return fallback;
+    }
+
+    private double pointY(List<String[]> pairs, int xIndex, double fallback) {
+        String yCode = String.valueOf(parseIntSafe(pairs.get(xIndex)[0], 0) + 10);
+        if (xIndex + 1 < pairs.size() && yCode.equals(pairs.get(xIndex + 1)[0])) {
+            return parseDoubleSafe(pairs.get(xIndex + 1)[1]);
+        }
+        return fallback;
+    }
+
+    private <T extends Enum<T>> T parseEnum(String value, T fallback) {
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        try {
+            return Enum.valueOf(fallback.getDeclaringClass(), value);
+        } catch (IllegalArgumentException ex) {
+            return fallback;
         }
     }
 
@@ -581,58 +778,112 @@ public class DxfImporter {
 
     /**
      * Общий метод построения примитивов из списка вершин полилинии.
-     * Распознаёт Rectangle (4 точки, прям. углы), правильный Polygon,
-     * или строит набор отрезков.
+     *
+     * Порядок распознавания для замкнутых полилиний:
+     *  1. Rectangle — 4 точки с прямыми углами
+     *  2. Polygon   — правильный многоугольник (до 20 вершин)
+     *  3. Circle    — много точек, все на одном расстоянии от центроида
+     *  4. Ellipse   — подгонка эллипсом методом наименьших квадратов
+     *  5. Spline / Polyline — fallback
+     *
+     * Для открытых полилиний: Spline если preferSpline, иначе Polyline.
      */
     private int buildPolylinePrimitives(List<Point> vertices, boolean closed, boolean preferSpline,
                                         EntityCommon common, ImportResult result,
                                         int returnIndex) {
         if (vertices.size() < 2) { result.skippedEntities++; return returnIndex; }
 
-        if (preferSpline && vertices.size() >= 4) {
-            Spline spline = new Spline(vertices, closed, 0.5, styleManager.getDefaultStyle());
-            applyCommon(spline, common, result);
-            result.primitives.add(spline);
-
-        } else if (closed && vertices.size() == 4 && isRectangle(vertices)) {
-            double minX = Double.MAX_VALUE, minY = Double.MAX_VALUE;
-            double maxX = -Double.MAX_VALUE, maxY = -Double.MAX_VALUE;
-            for (Point v : vertices) {
-                minX = Math.min(minX, v.getX()); minY = Math.min(minY, v.getY());
-                maxX = Math.max(maxX, v.getX()); maxY = Math.max(maxY, v.getY());
+        if (closed) {
+            // 1. Прямоугольник
+            if (vertices.size() == 4 && isRectangle(vertices)) {
+                double minX = Double.MAX_VALUE, minY = Double.MAX_VALUE;
+                double maxX = -Double.MAX_VALUE, maxY = -Double.MAX_VALUE;
+                for (Point v : vertices) {
+                    minX = Math.min(minX, v.getX()); minY = Math.min(minY, v.getY());
+                    maxX = Math.max(maxX, v.getX()); maxY = Math.max(maxY, v.getY());
+                }
+                Rectangle rect = new Rectangle(
+                        new Point((minX + maxX) / 2, (minY + maxY) / 2),
+                        maxX - minX, maxY - minY, styleManager.getDefaultStyle());
+                applyCommon(rect, common, result);
+                result.primitives.add(rect);
+                return returnIndex;
             }
-            Rectangle rect = new Rectangle(
-                    new Point((minX + maxX) / 2, (minY + maxY) / 2),
-                    maxX - minX, maxY - minY, styleManager.getDefaultStyle());
-            applyCommon(rect, common, result);
-            result.primitives.add(rect);
 
-        } else if (closed && vertices.size() >= 3 && isRegularPolygon(vertices)) {
-            Point  center   = centroid(vertices);
-            double radius   = distance(center, vertices.get(0));
-            double rotation = Math.atan2(
-                    vertices.get(0).getY() - center.getY(),
-                    vertices.get(0).getX() - center.getX());
-            Polygon polygon = new Polygon(center, radius, vertices.size(),
-                    Polygon.InscriptionType.INSCRIBED, rotation, styleManager.getDefaultStyle());
-            applyCommon(polygon, common, result);
-            result.primitives.add(polygon);
+            // 2. Правильный многоугольник (только небольшие — иначе это аппроксимация кривой)
+            if (vertices.size() >= 3 && vertices.size() <= 20 && isRegularPolygon(vertices)) {
+                Point  center   = centroid(vertices);
+                double radius   = distance(center, vertices.get(0));
+                double rotation = Math.atan2(
+                        vertices.get(0).getY() - center.getY(),
+                        vertices.get(0).getX() - center.getX());
+                Polygon polygon = new Polygon(center, radius, vertices.size(),
+                        Polygon.InscriptionType.INSCRIBED, rotation, styleManager.getDefaultStyle());
+                applyCommon(polygon, common, result);
+                result.primitives.add(polygon);
+                return returnIndex;
+            }
+
+            // 3. Окружность (много точек, равноудалённых от центра)
+            if (vertices.size() >= 8) {
+                Circle circle = tryCreateCircleFromPolyline(vertices);
+                if (circle != null) {
+                    applyCommon(circle, common, result);
+                    result.primitives.add(circle);
+                    return returnIndex;
+                }
+
+                // 4. Эллипс (подгонка МНК)
+                Ellipse ellipse = tryCreateEllipseFromPolyline(vertices);
+                if (ellipse != null) {
+                    ellipse.setLineStyle(styleManager.getDefaultStyle());
+                    applyCommon(ellipse, common, result);
+                    result.primitives.add(ellipse);
+                    return returnIndex;
+                }
+            }
+
+            // 5. Fallback для замкнутой кривой
+            if (preferSpline && vertices.size() >= 4) {
+                Spline spline = new Spline(vertices, true, 0.5, styleManager.getDefaultStyle());
+                applyCommon(spline, common, result);
+                result.primitives.add(spline);
+            } else {
+                Polyline polyline = new Polyline(vertices, true, styleManager.getDefaultStyle());
+                applyCommon(polyline, common, result);
+                result.primitives.add(polyline);
+            }
 
         } else {
-            for (int j = 0; j < vertices.size() - 1; j++) {
-                Segment seg = new Segment(vertices.get(j), vertices.get(j + 1),
-                        Segment.CreationMode.CARTESIAN, styleManager.getDefaultStyle());
-                applyCommon(seg, common, result);
-                result.primitives.add(seg);
-            }
-            if (closed && vertices.size() > 2) {
-                Segment seg = new Segment(vertices.get(vertices.size() - 1), vertices.get(0),
-                        Segment.CreationMode.CARTESIAN, styleManager.getDefaultStyle());
-                applyCommon(seg, common, result);
-                result.primitives.add(seg);
+            // Открытая полилиния
+            if (preferSpline && vertices.size() >= 4) {
+                Spline spline = new Spline(vertices, false, 0.5, styleManager.getDefaultStyle());
+                applyCommon(spline, common, result);
+                result.primitives.add(spline);
+            } else {
+                Polyline polyline = new Polyline(vertices, false, styleManager.getDefaultStyle());
+                applyCommon(polyline, common, result);
+                result.primitives.add(polyline);
             }
         }
         return returnIndex;
+    }
+
+    /**
+     * Пытается распознать окружность из замкнутой полилинии.
+     * Все точки должны быть равноудалены от центроида с допуском 2%.
+     */
+    private Circle tryCreateCircleFromPolyline(List<Point> vertices) {
+        if (vertices.size() < 8) return null;
+        Point center = centroid(vertices);
+        double sumR = 0;
+        for (Point p : vertices) sumR += distance(center, p);
+        double avgR = sumR / vertices.size();
+        if (avgR < 0.001) return null;
+        for (Point p : vertices) {
+            if (Math.abs(distance(center, p) - avgR) / avgR > 0.02) return null;
+        }
+        return new Circle(center, avgR, styleManager.getDefaultStyle());
     }
 
     /**
@@ -826,6 +1077,128 @@ public class DxfImporter {
         return true;
     }
 
+    private Ellipse tryCreateEllipseFromPolyline(List<Point> vertices) {
+        if (vertices.size() < 8) {
+            return null;
+        }
+
+        Point centroid = centroid(vertices);
+
+        double sxx = 0.0;
+        double syy = 0.0;
+        double sxy = 0.0;
+        for (Point point : vertices) {
+            double dx = point.getX() - centroid.getX();
+            double dy = point.getY() - centroid.getY();
+            sxx += dx * dx;
+            syy += dy * dy;
+            sxy += dx * dy;
+        }
+        sxx /= vertices.size();
+        syy /= vertices.size();
+        sxy /= vertices.size();
+
+        double trace = sxx + syy;
+        double diff = sxx - syy;
+        double root = Math.sqrt(diff * diff + 4.0 * sxy * sxy);
+        double lambdaMajor = (trace + root) / 2.0;
+        double lambdaMinor = (trace - root) / 2.0;
+        if (lambdaMajor <= 1e-9 || lambdaMinor <= 1e-9) {
+            return null;
+        }
+
+        double rotation = 0.5 * Math.atan2(2.0 * sxy, diff);
+        double cos = Math.cos(rotation);
+        double sin = Math.sin(rotation);
+
+        double minX = Double.MAX_VALUE;
+        double maxX = -Double.MAX_VALUE;
+        double minY = Double.MAX_VALUE;
+        double maxY = -Double.MAX_VALUE;
+        for (Point point : vertices) {
+            double dx = point.getX() - centroid.getX();
+            double dy = point.getY() - centroid.getY();
+            double localX = dx * cos + dy * sin;
+            double localY = -dx * sin + dy * cos;
+            minX = Math.min(minX, localX);
+            maxX = Math.max(maxX, localX);
+            minY = Math.min(minY, localY);
+            maxY = Math.max(maxY, localY);
+        }
+
+        double localCenterX = (minX + maxX) / 2.0;
+        double localCenterY = (minY + maxY) / 2.0;
+        Point center = new Point(
+                centroid.getX() + localCenterX * cos - localCenterY * sin,
+                centroid.getY() + localCenterX * sin + localCenterY * cos);
+
+        double xx2 = 0.0;
+        double yy2 = 0.0;
+        double x2y2 = 0.0;
+        double x2 = 0.0;
+        double y2 = 0.0;
+        for (Point point : vertices) {
+            double dx = point.getX() - center.getX();
+            double dy = point.getY() - center.getY();
+            double localX = dx * cos + dy * sin;
+            double localY = -dx * sin + dy * cos;
+            double vx = localX * localX;
+            double vy = localY * localY;
+            xx2 += vx * vx;
+            yy2 += vy * vy;
+            x2y2 += vx * vy;
+            x2 += vx;
+            y2 += vy;
+        }
+
+        double det = xx2 * yy2 - x2y2 * x2y2;
+        if (Math.abs(det) < 1e-12) {
+            return null;
+        }
+
+        double invA = (x2 * yy2 - y2 * x2y2) / det;
+        double invB = (y2 * xx2 - x2 * x2y2) / det;
+        if (invA <= 0.0 || invB <= 0.0) {
+            return null;
+        }
+
+        double semiMajor = Math.sqrt(1.0 / invA);
+        double semiMinor = Math.sqrt(1.0 / invB);
+        if (semiMajor < semiMinor) {
+            double tmp = semiMajor;
+            semiMajor = semiMinor;
+            semiMinor = tmp;
+            rotation += Math.PI / 2.0;
+            cos = Math.cos(rotation);
+            sin = Math.sin(rotation);
+        }
+
+        if (semiMajor <= 0.001 || semiMinor <= 0.001) {
+            return null;
+        }
+
+        double meanResidual = 0.0;
+        double maxResidual = 0.0;
+        for (Point point : vertices) {
+            double dx = point.getX() - center.getX();
+            double dy = point.getY() - center.getY();
+            double localX = dx * cos + dy * sin;
+            double localY = -dx * sin + dy * cos;
+            double normalized = (localX * localX) / (semiMajor * semiMajor)
+                    + (localY * localY) / (semiMinor * semiMinor);
+            double residual = Math.abs(normalized - 1.0);
+            meanResidual += residual;
+            maxResidual = Math.max(maxResidual, residual);
+        }
+        meanResidual /= vertices.size();
+
+        if (meanResidual > 0.12 || maxResidual > 0.25) {
+            return null;
+        }
+
+        return new Ellipse(center, semiMajor, semiMinor, normalizeAngle(rotation), styleManager.getDefaultStyle());
+    }
+
     private Point centroid(List<Point> points) {
         double sx = 0, sy = 0;
         for (Point p : points) { sx += p.getX(); sy += p.getY(); }
@@ -835,6 +1208,14 @@ public class DxfImporter {
     private double distance(Point a, Point b) {
         double dx = b.getX() - a.getX(), dy = b.getY() - a.getY();
         return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    private double normalizeAngle(double angle) {
+        double normalized = angle % Math.PI;
+        if (normalized < 0) {
+            normalized += Math.PI;
+        }
+        return normalized;
     }
 
     private double parseDoubleSafe(String s) {
@@ -858,7 +1239,7 @@ public class DxfImporter {
             case 2  -> javafx.scene.paint.Color.YELLOW;
             case 3  -> javafx.scene.paint.Color.LIME;
             case 4  -> javafx.scene.paint.Color.CYAN;
-            case 5  -> javafx.scene.paint.Color.BLUE;
+            case 5  -> javafx.scene.paint.Color.DARKBLUE;
             case 6  -> javafx.scene.paint.Color.MAGENTA;
             case 7  -> javafx.scene.paint.Color.WHITE;
             case 8  -> javafx.scene.paint.Color.DARKGRAY;

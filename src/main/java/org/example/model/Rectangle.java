@@ -264,12 +264,61 @@ public class Rectangle extends Primitive {
 
     @Override
     public boolean containsPoint(Point point, double tolerance) {
+        double hw = width / 2;
+        double hh = height / 2;
+        double cx = center.getX();
+        double cy = center.getY();
+
+        if (cornerType == CornerType.ROUNDED && cornerRadius > 0) {
+            double r = cornerRadius;
+            // Центры дуг для четырёх углов
+            Point[] arcCenters = {
+                new Point(cx - hw + r, cy - hh + r), // нижний-левый
+                new Point(cx + hw - r, cy - hh + r), // нижний-правый
+                new Point(cx + hw - r, cy + hh - r), // верхний-правый
+                new Point(cx - hw + r, cy + hh - r)  // верхний-левый
+            };
+            for (Point arcCenter : arcCenters) {
+                if (Math.abs(distance(point, arcCenter) - r) < tolerance) {
+                    return true;
+                }
+            }
+            // Прямые рёбра между касательными точками
+            Point[] tangentPoints = {
+                new Point(cx - hw + r, cy - hh), new Point(cx + hw - r, cy - hh), // нижнее ребро
+                new Point(cx + hw, cy - hh + r), new Point(cx + hw, cy + hh - r), // правое ребро
+                new Point(cx + hw - r, cy + hh), new Point(cx - hw + r, cy + hh), // верхнее ребро
+                new Point(cx - hw, cy + hh - r), new Point(cx - hw, cy - hh + r)  // левое ребро
+            };
+            for (int i = 0; i < 8; i += 2) {
+                if (distanceToSegment(point, tangentPoints[i], tangentPoints[i + 1]) < tolerance) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        if (cornerType == CornerType.CHAMFERED && cornerRadius > 0) {
+            double c = cornerRadius;
+            // Вершины со срезанными углами (8 точек по порядку)
+            Point[] verts = {
+                new Point(cx - hw + c, cy - hh), new Point(cx + hw - c, cy - hh),
+                new Point(cx + hw, cy - hh + c), new Point(cx + hw, cy + hh - c),
+                new Point(cx + hw - c, cy + hh), new Point(cx - hw + c, cy + hh),
+                new Point(cx - hw, cy + hh - c), new Point(cx - hw, cy - hh + c)
+            };
+            for (int i = 0; i < 8; i++) {
+                if (distanceToSegment(point, verts[i], verts[(i + 1) % 8]) < tolerance) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Обычный (острые углы)
         Point[] corners = getCorners();
-        
         for (int i = 0; i < 4; i++) {
-            Point p1 = corners[i];
-            Point p2 = corners[(i + 1) % 4];
-            if (distanceToSegment(point, p1, p2) < tolerance) {
+            if (distanceToSegment(point, corners[i], corners[(i + 1) % 4]) < tolerance) {
                 return true;
             }
         }

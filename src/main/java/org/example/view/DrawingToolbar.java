@@ -365,13 +365,30 @@ public class DrawingToolbar {
         radiusSpinner.valueProperty().addListener((obs, oldVal, newVal) -> {
             drawingState.setRectangleCornerRadius(newVal);
         });
-        
-        radiusLabel.visibleProperty().bind(
-            cornerTypeCombo.valueProperty().isNotEqualTo(Rectangle.CornerType.SHARP)
-        );
-        radiusSpinner.visibleProperty().bind(
-            cornerTypeCombo.valueProperty().isNotEqualTo(Rectangle.CornerType.SHARP)
-        );
+
+        drawingState.rectangleCornerRadiusProperty().addListener((obs, oldVal, newVal) -> {
+            double value = newVal != null ? newVal.doubleValue() : 0.0;
+            Double current = radiusSpinner.getValue();
+            if (current == null || Math.abs(current - value) > 1e-9) {
+                radiusSpinner.getValueFactory().setValue(value);
+            }
+        });
+        cornerTypeCombo.valueProperty().addListener((obs, oldVal, newVal) -> {
+            if (newVal == Rectangle.CornerType.CHAMFERED) {
+                radiusLabel.setText("Фаска:");
+            } else if (newVal == Rectangle.CornerType.ROUNDED) {
+                radiusLabel.setText("Радиус:");
+            } else {
+                radiusLabel.setText("Параметр:");
+            }
+        });
+        if (drawingState.getRectangleCornerType() == Rectangle.CornerType.CHAMFERED) {
+            radiusLabel.setText("Фаска:");
+        } else if (drawingState.getRectangleCornerType() == Rectangle.CornerType.ROUNDED) {
+            radiusLabel.setText("Радиус:");
+        } else {
+            radiusLabel.setText("Параметр:");
+        }
         
         HBox box = new HBox(10, cornerLabel, cornerTypeCombo, radiusLabel, radiusSpinner);
         box.setAlignment(Pos.CENTER_LEFT);

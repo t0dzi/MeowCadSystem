@@ -57,6 +57,12 @@ public class RadialDimension extends DimensionPrimitive {
     private Kind kind;
     private ShelfSide shelfSide = ShelfSide.ALONG_LINE;
 
+    /**
+     * Индекс угла скруглённого прямоугольника: 0=нижний-левый, 1=нижний-правый,
+     * 2=верхний-правый, 3=верхний-левый. −1 означает «не прямоугольник».
+     */
+    private int cornerIndex = -1;
+
     public RadialDimension(Primitive referencedPrimitive, Point leaderPoint, Kind kind, LineStyle lineStyle) {
         super(lineStyle);
         this.referencedPrimitive = referencedPrimitive;
@@ -100,7 +106,22 @@ public class RadialDimension extends DimensionPrimitive {
         shelfSide = shelfSide.toggle();
     }
 
+    public int getCornerIndex() {
+        return cornerIndex;
+    }
+
+    public void setCornerIndex(int cornerIndex) {
+        this.cornerIndex = cornerIndex;
+    }
+
+    /**
+     * Возвращает центр дуги, к которой привязан размер.
+     * Для скруглённого прямоугольника — центр дуги соответствующего угла.
+     */
     public Point getCenterPoint() {
+        if (cornerIndex >= 0 && referencedPrimitive instanceof Rectangle rect) {
+            return getRectangleCornerCenter(rect, cornerIndex);
+        }
         return referencedPrimitive.getCenter();
     }
 
@@ -111,7 +132,30 @@ public class RadialDimension extends DimensionPrimitive {
         if (referencedPrimitive instanceof Arc arc) {
             return arc.getRadius();
         }
+        if (referencedPrimitive instanceof Rectangle rect
+                && rect.getCornerType() == Rectangle.CornerType.ROUNDED) {
+            return rect.getCornerRadius();
+        }
         return 0.0;
+    }
+
+    /**
+     * Вычисляет центр дуги скруглённого угла прямоугольника.
+     * Индексы: 0=нижний-левый, 1=нижний-правый, 2=верхний-правый, 3=верхний-левый.
+     */
+    private static Point getRectangleCornerCenter(Rectangle rect, int cornerIndex) {
+        double cx = rect.getCenter().getX();
+        double cy = rect.getCenter().getY();
+        double hw = rect.getWidth()  / 2;
+        double hh = rect.getHeight() / 2;
+        double r  = rect.getCornerRadius();
+        return switch (cornerIndex) {
+            case 0 -> new Point(cx - hw + r, cy - hh + r); // нижний-левый
+            case 1 -> new Point(cx + hw - r, cy - hh + r); // нижний-правый
+            case 2 -> new Point(cx + hw - r, cy + hh - r); // верхний-правый
+            case 3 -> new Point(cx - hw + r, cy + hh - r); // верхний-левый
+            default -> rect.getCenter();
+        };
     }
 
     public Point getAttachmentPoint() {

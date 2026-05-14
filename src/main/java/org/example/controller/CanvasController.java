@@ -38,8 +38,19 @@ public class CanvasController {
     
     private ControlPoint draggedControlPoint = null;
     private int draggedControlPointIndex = -1;
+    private PrimitiveSnapshot draggedPrimitiveSnapshot = null;
     
     private int selectedControlPointIndex = -1;
+
+    // Рамка выделения
+    private Point rubberBandStartScreen = null;
+    private Point rubberBandCurrentScreen = null;
+
+    // Перемещение выделенных объектов
+    private boolean movingSelection = false;
+    private Point lastMoveWorldPos = null;
+    private Point moveStartWorldPos = null;
+    private List<Primitive> movingPrimitives = List.of();
 
     /**
      * Создаёт контроллер и подключает обработчики событий к холсту.
@@ -80,10 +91,29 @@ public class CanvasController {
             return;
         }
 
-        if (event.getCode() == KeyCode.F3) {
+        if (event.getCode() == KeyCode.Z && event.isControlDown()) {
+            if (model.undo()) {
+                painter.redrawAll();
+            }
+            event.consume();
+            updateInfoLabel();
+            return;
+        }
+
+        if (event.getCode() == KeyCode.S) {
+            drawingState.setCurrentTool(DrawingState.Tool.SELECT);
+            painter.redrawAll();
+            updateInfoLabel();
+        } else if (event.getCode() == KeyCode.F3) {
             SnapManager snapManager = model.getSnapManager();
             snapManager.setSnapEnabled(!snapManager.isSnapEnabled());
             painter.redrawAll();
+        } else if (event.getCode() == KeyCode.A && event.isControlDown()) {
+            // Ctrl+A — выбрать все
+            if (drawingState.getCurrentTool() == Tool.SELECT) {
+                model.selectAll();
+                painter.redrawAll();
+            }
         } else if (event.getCode() == KeyCode.M) {
             if (handleDimensionModeToggle()) {
                 painter.redrawAll();
@@ -104,15 +134,22 @@ public class CanvasController {
             rotateAroundCenter(delta);
         } else if (event.getCode() == KeyCode.DELETE || event.getCode() == KeyCode.BACK_SPACE) {
             Primitive selected = model.getSelectedPrimitive();
+            List<Primitive> selectedPrimitives = new ArrayList<>(model.getSelectedPrimitives());
             if (selected != null) {
-                if (selected instanceof Spline spline && selectedControlPointIndex >= 0) {
+                if (selectedPrimitives.size() == 1 && selected instanceof Spline spline && selectedControlPointIndex >= 0) {
+                    PrimitiveSnapshot before = PrimitiveSnapshot.capture(spline);
                     if (spline.removeControlPoint(selectedControlPointIndex)) {
+                        if (before.hasChanged()) {
+                            model.pushUndo(before::restore);
+                        }
                         selectedControlPointIndex = -1;
                         painter.redrawAll();
                         return;
                     }
                 }
-                model.removePrimitive(selected);
+                for (Primitive primitive : selectedPrimitives) {
+                    model.removePrimitive(primitive);
+                }
                 selectedControlPointIndex = -1;
                 painter.redrawAll();
             }
@@ -120,16 +157,16 @@ public class CanvasController {
             if (drawingState.isDrawing()) {
                 drawingState.reset();
             } else {
-                model.setSelectedPrimitive(null);
+                model.clearSelection();
             }
             painter.redrawAll();
         } else if (event.getCode() == KeyCode.ENTER) {
-            if (drawingState.getCurrentTool() == Tool.SPLINE && 
+            if (drawingState.getCurrentTool() == Tool.SPLINE &&
                 drawingState.getCollectedPoints().size() >= 2) {
                 finishSpline();
             }
         }
-        
+
         updateInfoLabel();
     }
 
@@ -138,6 +175,7 @@ public class CanvasController {
         double centerY = canvas.getHeight() / 2;
 
         Point worldCenter = painter.toWorld(centerX, centerY);
+        camera.beginUpdate();
         double newAngle = camera.getAngle() + angleDelta;
         camera.setAngle(newAngle);
 
@@ -149,6 +187,8 @@ public class CanvasController {
 
         camera.setX(-rotX * s);
         camera.setY(-rotY * s);
+        camera.endUpdate();
+        painter.redrawAll();
     }
 
     private void addMouseHandlers(Canvas canvas, Label infoLabel) {
@@ -184,6 +224,8 @@ public class CanvasController {
     }
 
     private void handleMousePressed(MouseEvent event) {
+        canvas.requestFocus();
+
         if (event.getButton() == MouseButton.MIDDLE) {
             lastMouseX = event.getX();
             lastMouseY = event.getY();
@@ -205,7 +247,7 @@ public class CanvasController {
         
         if (event.getButton() == MouseButton.PRIMARY) {
             if (tool == Tool.DIMENSION) {
-                handleDimensionInput(clickPoint, effectivePoint, snap);
+                handleDimensionInput(clickPoint, effectivePoint, snap, event.isControlDown());
             } else {
                 drawingState.addPoint(effectivePoint);
                 if (drawingState.hasEnoughPoints()) {
@@ -219,20 +261,63 @@ public class CanvasController {
 
     private void handleSelectMode(MouseEvent event, Point clickPoint) {
         Primitive selected = model.getSelectedPrimitive();
-        if (selected != null && event.getButton() == MouseButton.PRIMARY) {
+        if (selected != null
+                && model.getSelectedPrimitives().size() == 1
+                && event.getButton() == MouseButton.PRIMARY
+                && !isMultiSelectionGesture(event)) {
             ControlPoint cp = findControlPointAt(selected, event.getX(), event.getY());
             if (cp != null) {
                 draggedControlPoint = cp;
                 draggedControlPointIndex = cp.getIndex();
+                draggedPrimitiveSnapshot = PrimitiveSnapshot.capture(selected);
                 selectedControlPointIndex = cp.getIndex();
                 return;
             }
         }
-        
+
         selectedControlPointIndex = -1;
-        
-        Primitive clickedPrimitive = findPrimitiveAt(clickPoint);
-        model.setSelectedPrimitive(clickedPrimitive);
+
+        SelectionHit hit = findPrimitiveAt(clickPoint, event.isControlDown());
+        Primitive clickedPrimitive = hit.primitive();
+
+        if (clickedPrimitive != null) {
+            String pendingLayer = model.getPendingLayerAssignmentName();
+            if (pendingLayer != null && event.getButton() == MouseButton.PRIMARY) {
+                if (event.isControlDown()) {
+                    model.movePrimitiveToDefaultLayer(clickedPrimitive);
+                } else {
+                    model.assignPrimitiveToLayer(clickedPrimitive, pendingLayer);
+                }
+                model.clearPendingLayerAssignment();
+                painter.redrawAll();
+                return;
+            }
+            // Клик по уже выделенному (без Ctrl/Shift) — начинаем потенциальное перемещение
+            if (!isMultiSelectionGesture(event) && model.isPrimitiveSelected(clickedPrimitive)
+                    && event.getButton() == MouseButton.PRIMARY) {
+                movingSelection = true;
+                lastMoveWorldPos = clickPoint;
+                moveStartWorldPos = clickPoint;
+                movingPrimitives = new ArrayList<>(model.getSelectedPrimitives());
+                return;
+            }
+            if (hit.usedUnderlyingGeometry()) {
+                model.setSelectedPrimitive(clickedPrimitive);
+            } else if (isMultiSelectionGesture(event)) {
+                model.togglePrimitiveSelection(clickedPrimitive);
+            } else {
+                model.setSelectedPrimitive(clickedPrimitive);
+            }
+        } else {
+            // Клик по пустому месту — начинаем рамку выделения
+            if (!isMultiSelectionGesture(event)) {
+                model.clearSelection();
+            }
+            if (event.getButton() == MouseButton.PRIMARY) {
+                rubberBandStartScreen = new Point(event.getX(), event.getY());
+                rubberBandCurrentScreen = new Point(event.getX(), event.getY());
+            }
+        }
         painter.redrawAll();
     }
 
@@ -247,23 +332,46 @@ public class CanvasController {
             painter.redrawAll();
             return;
         }
-        
+
+        // Перемещение выделенных объектов
+        if (movingSelection && event.getButton() == MouseButton.PRIMARY) {
+            Point currentWorld = toWorld(event.getX(), event.getY());
+            double dx = currentWorld.getX() - lastMoveWorldPos.getX();
+            double dy = currentWorld.getY() - lastMoveWorldPos.getY();
+            for (Primitive p : new ArrayList<>(model.getSelectedPrimitives())) {
+                p.translate(dx, dy);
+            }
+            lastMoveWorldPos = currentWorld;
+            painter.redrawAll();
+            return;
+        }
+
         if (draggedControlPoint != null && draggedControlPointIndex >= 0) {
             Primitive selected = model.getSelectedPrimitive();
             if (selected != null) {
                 if (selected instanceof LinearDimension linearDimension && draggedControlPointIndex == 3) {
                     linearDimension.setTextPositionFactor(
                             painter.projectLinearDimensionTextFactor(linearDimension, event.getX(), event.getY()));
+                    model.markChanged();
                     painter.redrawAll();
                     return;
                 }
                 Point newPos = toWorld(event.getX(), event.getY());
                 selected.moveControlPoint(draggedControlPointIndex, newPos);
+                model.markChanged();
                 painter.redrawAll();
             }
             return;
         }
-        
+
+        // Обновление rubber band рамки
+        if (rubberBandStartScreen != null && event.getButton() == MouseButton.PRIMARY) {
+            rubberBandCurrentScreen = new Point(event.getX(), event.getY());
+            painter.setRubberBand(rubberBandStartScreen, rubberBandCurrentScreen);
+            painter.redrawAll();
+            return;
+        }
+
         if (drawingState.isDrawing() || drawingState.getCurrentTool() != Tool.SELECT) {
             drawingState.setCurrentMousePosition(toWorld(event.getX(), event.getY()));
         }
@@ -271,10 +379,45 @@ public class CanvasController {
 
     private void handleMouseReleased(MouseEvent event) {
         if (event.getButton() == MouseButton.MIDDLE) return;
-        
+
+        if (movingSelection) {
+            if (moveStartWorldPos != null && lastMoveWorldPos != null && !movingPrimitives.isEmpty()) {
+                double totalDx = lastMoveWorldPos.getX() - moveStartWorldPos.getX();
+                double totalDy = lastMoveWorldPos.getY() - moveStartWorldPos.getY();
+                List<Primitive> moved = new ArrayList<>(movingPrimitives);
+                if (Math.abs(totalDx) > 1e-9 || Math.abs(totalDy) > 1e-9) {
+                    model.pushUndo(() -> {
+                        for (Primitive primitive : moved) {
+                            primitive.translate(-totalDx, -totalDy);
+                        }
+                    });
+                }
+            }
+            movingSelection = false;
+            lastMoveWorldPos = null;
+            moveStartWorldPos = null;
+            movingPrimitives = List.of();
+            painter.redrawAll();
+            return;
+        }
+
         if (draggedControlPoint != null) {
+            if (draggedPrimitiveSnapshot != null && draggedPrimitiveSnapshot.hasChanged()) {
+                model.pushUndo(draggedPrimitiveSnapshot::restore);
+            }
             draggedControlPoint = null;
             draggedControlPointIndex = -1;
+            draggedPrimitiveSnapshot = null;
+            painter.redrawAll();
+        }
+
+        if (rubberBandStartScreen != null) {
+            Point endScreen = rubberBandCurrentScreen != null
+                    ? rubberBandCurrentScreen : rubberBandStartScreen;
+            selectPrimitivesInRubberBand(rubberBandStartScreen, endScreen, isMultiSelectionGesture(event));
+            rubberBandStartScreen = null;
+            rubberBandCurrentScreen = null;
+            painter.setRubberBand(null, null);
             painter.redrawAll();
         }
     }
@@ -299,7 +442,7 @@ public class CanvasController {
             Point effectivePos = snap != null ? snap.getPosition() : worldPos;
             if (drawingState.getCurrentTool() == Tool.DIMENSION
                     && drawingState.getCreationMethod() == CreationMethod.DIMENSION_ANGLE) {
-                effectivePos = assistAngularDimensionPoint(worldPos, effectivePos, snap);
+                effectivePos = assistAngularDimensionPoint(worldPos, effectivePos, snap, event.isControlDown());
             } else if (drawingState.getCurrentTool() == Tool.DIMENSION) {
                 effectivePos = assistLinearDimensionPoint(effectivePos);
             }
@@ -518,11 +661,15 @@ public class CanvasController {
             }
             case DIMENSION_RADIUS, DIMENSION_DIAMETER -> {
                 Primitive referenced = drawingState.getReferencePrimitive();
-                if (points.size() >= 2 && (referenced instanceof Circle || referenced instanceof Arc)) {
+                if (points.size() >= 2 && isRadiallyDimensionable(referenced)) {
                     RadialDimension.Kind kind = method == CreationMethod.DIMENSION_DIAMETER
                         ? RadialDimension.Kind.DIAMETER
                         : RadialDimension.Kind.RADIUS;
                     RadialDimension radialDimension = new RadialDimension(referenced, points.get(1), kind, style);
+                    // Для скруглённого прямоугольника запоминаем, к какому углу привязан размер
+                    if (referenced instanceof Rectangle rect) {
+                        radialDimension.setCornerIndex(findNearestRectCornerIndex(rect, points.get(0)));
+                    }
                     radialDimension.setShelfSide(drawingState.getRadialShelfSide());
                     primitive = radialDimension;
                 }
@@ -549,7 +696,7 @@ public class CanvasController {
         painter.redrawAll();
     }
 
-    private void handleDimensionInput(Point clickPoint, Point effectivePoint, SnapPoint snap) {
+    private void handleDimensionInput(Point clickPoint, Point effectivePoint, SnapPoint snap, boolean controlDown) {
         CreationMethod method = drawingState.getCreationMethod();
         if (method == null) {
             return;
@@ -558,7 +705,7 @@ public class CanvasController {
         if ((method == CreationMethod.DIMENSION_RADIUS || method == CreationMethod.DIMENSION_DIAMETER)
                 && drawingState.getCollectedPoints().isEmpty()) {
             Primitive referenced = findPrimitiveAt(clickPoint);
-            if (referenced instanceof Circle || referenced instanceof Arc) {
+            if (isRadiallyDimensionable(referenced)) {
                 drawingState.setReferencePrimitive(referenced);
                 drawingState.addPoint(clickPoint);
                 if (drawingState.hasEnoughPoints()) {
@@ -568,13 +715,23 @@ public class CanvasController {
             return;
         }
 
+        DimensionAnchor anchor = DimensionAnchor.fromSnapPoint(snap);
+
         if (method == CreationMethod.DIMENSION_ANGLE) {
-            effectivePoint = assistAngularDimensionPoint(clickPoint, effectivePoint, snap);
+            AngularPrimitiveSelection primitiveSelection = controlDown
+                    ? buildAngularPrimitiveSelection(clickPoint)
+                    : null;
+            if (primitiveSelection != null) {
+                effectivePoint = primitiveSelection.point();
+                anchor = primitiveSelection.anchor();
+            } else {
+                effectivePoint = assistAngularDimensionPoint(clickPoint, effectivePoint, snap, false);
+            }
         } else {
             effectivePoint = assistLinearDimensionPoint(effectivePoint);
         }
 
-        drawingState.addDimensionPoint(effectivePoint, DimensionAnchor.fromSnapPoint(snap));
+        drawingState.addDimensionPoint(effectivePoint, anchor);
         if (drawingState.hasEnoughPoints()) {
             createPrimitive();
         }
@@ -631,18 +788,107 @@ public class CanvasController {
         painter.redrawAll();
     }
 
+    private void selectPrimitivesInRubberBand(Point startScreen, Point endScreen, boolean addToSelection) {
+        double dragDist = Math.sqrt(
+            Math.pow(endScreen.getX() - startScreen.getX(), 2) +
+            Math.pow(endScreen.getY() - startScreen.getY(), 2));
+        if (dragDist < 4) return; // слишком маленький drag — считаем кликом
+
+        // left-to-right = window (объект полностью внутри)
+        // right-to-left = crossing (объект пересекает рамку)
+        boolean windowSelect = endScreen.getX() >= startScreen.getX();
+
+        // Конвертируем 4 угла экранного прямоугольника в мировые координаты
+        double sx1 = startScreen.getX(), sy1 = startScreen.getY();
+        double sx2 = endScreen.getX(), sy2 = endScreen.getY();
+        Point w1 = toWorld(sx1, sy1);
+        Point w2 = toWorld(sx2, sy1);
+        Point w3 = toWorld(sx2, sy2);
+        Point w4 = toWorld(sx1, sy2);
+
+        double minWX = Math.min(Math.min(w1.getX(), w2.getX()), Math.min(w3.getX(), w4.getX()));
+        double maxWX = Math.max(Math.max(w1.getX(), w2.getX()), Math.max(w3.getX(), w4.getX()));
+        double minWY = Math.min(Math.min(w1.getY(), w2.getY()), Math.min(w3.getY(), w4.getY()));
+        double maxWY = Math.max(Math.max(w1.getY(), w2.getY()), Math.max(w3.getY(), w4.getY()));
+
+        if (!addToSelection) {
+            model.clearSelection();
+        }
+
+        for (Primitive p : model.getPrimitives()) {
+            if (!model.isPrimitiveLayerVisible(p) || model.isPrimitiveLayerLocked(p)) {
+                continue;
+            }
+            double[] bbox = p.getBoundingBox(); // [minX, minY, maxX, maxY]
+            boolean inSelection;
+            if (windowSelect) {
+                // Объект полностью внутри рамки
+                inSelection = bbox[0] >= minWX && bbox[1] >= minWY
+                           && bbox[2] <= maxWX && bbox[3] <= maxWY;
+            } else {
+                // Объект пересекает рамку
+                inSelection = bbox[0] <= maxWX && bbox[2] >= minWX
+                           && bbox[1] <= maxWY && bbox[3] >= minWY;
+            }
+            if (inSelection) {
+                model.togglePrimitiveSelection(p);
+            }
+        }
+    }
+
+    /**
+     * Возвращает true, если примитив поддерживает радиальный/диаметральный размер:
+     * окружность, дуга, или прямоугольник со скруглёнными углами.
+     */
+    private boolean isRadiallyDimensionable(Primitive p) {
+        if (p instanceof Circle || p instanceof Arc) return true;
+        if (p instanceof Rectangle rect) {
+            return rect.getCornerType() == Rectangle.CornerType.ROUNDED && rect.getCornerRadius() > 0;
+        }
+        return false;
+    }
+
+    /**
+     * Находит индекс угла скруглённого прямоугольника, ближайшего к clickPoint.
+     * Индексы: 0 = нижний-левый, 1 = нижний-правый, 2 = верхний-правый, 3 = верхний-левый.
+     */
+    private int findNearestRectCornerIndex(Rectangle rect, Point clickPoint) {
+        double cx = rect.getCenter().getX();
+        double cy = rect.getCenter().getY();
+        double hw = rect.getWidth() / 2;
+        double hh = rect.getHeight() / 2;
+        double r  = rect.getCornerRadius();
+        Point[] arcCenters = {
+            new Point(cx - hw + r, cy - hh + r), // 0: нижний-левый
+            new Point(cx + hw - r, cy - hh + r), // 1: нижний-правый
+            new Point(cx + hw - r, cy + hh - r), // 2: верхний-правый
+            new Point(cx - hw + r, cy + hh - r)  // 3: верхний-левый
+        };
+        int nearest = 0;
+        double minDist = Double.MAX_VALUE;
+        for (int i = 0; i < 4; i++) {
+            double d = distance(clickPoint, arcCenters[i]);
+            if (d < minDist) { minDist = d; nearest = i; }
+        }
+        return nearest;
+    }
 
     private Point toWorld(double screenX, double screenY) {
         return painter.toWorld(screenX, screenY);
     }
 
-    private Point assistAngularDimensionPoint(Point rawPoint, Point effectivePoint, SnapPoint snap) {
+    private Point assistAngularDimensionPoint(Point rawPoint, Point effectivePoint, SnapPoint snap, boolean controlDown) {
         if (snap != null) {
             return effectivePoint;
         }
 
         int collected = drawingState.getCollectedPoints().size();
-        if (collected != 1 && collected != 2) {
+        if (collected == 3) {
+            Point assistedArcPoint = assistAngularDimensionArcPoint(rawPoint);
+            return assistedArcPoint != null ? assistedArcPoint : effectivePoint;
+        }
+
+        if (!controlDown || (collected != 1 && collected != 2)) {
             return effectivePoint;
         }
 
@@ -653,6 +899,64 @@ public class CanvasController {
 
         Point projected = projectPointToPrimitive(rawPoint, primitive);
         return projected != null ? projected : effectivePoint;
+    }
+
+    private Point assistAngularDimensionArcPoint(Point rawPoint) {
+        Point mouseScreen = painter.toScreen(rawPoint);
+        double bestDistance = 12.0;
+        Point bestPoint = null;
+
+        for (Primitive primitive : model.getPrimitives()) {
+            if (primitive instanceof DimensionPrimitive) {
+                continue;
+            }
+
+            Point projected = projectPointToPrimitive(rawPoint, primitive);
+            if (projected == null) {
+                continue;
+            }
+
+            double screenDistance = distance(mouseScreen, painter.toScreen(projected));
+            if (screenDistance > bestDistance) {
+                continue;
+            }
+
+            bestDistance = screenDistance;
+            bestPoint = projected;
+        }
+
+        return bestPoint;
+    }
+
+    private AngularPrimitiveSelection buildAngularPrimitiveSelection(Point rawPoint) {
+        int collected = drawingState.getCollectedPoints().size();
+        if (collected != 1 && collected != 2) {
+            return null;
+        }
+
+        Primitive primitive = findPrimitiveAt(rawPoint);
+        if (primitive == null) {
+            return null;
+        }
+
+        if (primitive instanceof Segment segment) {
+            Point projected = projectPointToSegment(rawPoint, segment.getStartPoint(), segment.getEndPoint());
+            double parameter = projectParameter(rawPoint, segment.getStartPoint(), segment.getEndPoint());
+            return new AngularPrimitiveSelection(projected,
+                    DimensionAnchor.parametricSegmentPoint(segment, parameter, projected));
+        }
+
+        if (primitive instanceof Polyline polyline) {
+            PolylineSegmentProjection projection = projectPointToPolylineSegment(rawPoint, polyline);
+            if (projection == null) {
+                return null;
+            }
+            return new AngularPrimitiveSelection(projection.point(),
+                    DimensionAnchor.parametricPolylinePoint(polyline, projection.segmentIndex(),
+                            projection.parameter(), projection.point()));
+        }
+
+        return null;
     }
 
     private Point assistLinearDimensionPoint(Point effectivePoint) {
@@ -718,6 +1022,9 @@ public class CanvasController {
         if (primitive instanceof Segment segment) {
             return projectPointToSegment(point, segment.getStartPoint(), segment.getEndPoint());
         }
+        if (primitive instanceof Polyline polyline) {
+            return projectPointToPolylineEdges(point, polyline.getVertices(), polyline.isClosed());
+        }
         if (primitive instanceof Circle circle) {
             return projectPointToCircle(point, circle.getCenter(), circle.getRadius());
         }
@@ -732,6 +1039,16 @@ public class CanvasController {
         }
         return null;
     }
+
+    private boolean isMultiSelectionGesture(MouseEvent event) {
+        return event.isControlDown() || event.isShiftDown();
+    }
+
+    private record AngularPrimitiveSelection(Point point, DimensionAnchor anchor) {}
+
+    private record PolylineSegmentProjection(int segmentIndex, double parameter, Point point) {}
+
+    private record SelectionHit(Primitive primitive, boolean usedUnderlyingGeometry) {}
 
     private Point projectPointToPolylineEdges(Point point, Point[] vertices, boolean closed) {
         Point bestPoint = null;
@@ -748,6 +1065,44 @@ public class CanvasController {
         }
 
         return bestPoint;
+    }
+
+    private Point projectPointToPolylineEdges(Point point, List<Point> vertices, boolean closed) {
+        Point bestPoint = null;
+        double bestDistance = Double.MAX_VALUE;
+        int edgeCount = closed ? vertices.size() : vertices.size() - 1;
+
+        for (int i = 0; i < edgeCount; i++) {
+            Point projected = projectPointToSegment(point, vertices.get(i), vertices.get((i + 1) % vertices.size()));
+            double distance = distance(point, projected);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestPoint = projected;
+            }
+        }
+
+        return bestPoint;
+    }
+
+    private PolylineSegmentProjection projectPointToPolylineSegment(Point point, Polyline polyline) {
+        List<Point> vertices = polyline.getVertices();
+        int edgeCount = polyline.isClosed() ? vertices.size() : vertices.size() - 1;
+        PolylineSegmentProjection bestProjection = null;
+        double bestDistance = Double.MAX_VALUE;
+
+        for (int i = 0; i < edgeCount; i++) {
+            Point start = vertices.get(i);
+            Point end = vertices.get((i + 1) % vertices.size());
+            double parameter = projectParameter(point, start, end);
+            Point projected = projectPointToSegment(point, start, end);
+            double distance = distance(point, projected);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestProjection = new PolylineSegmentProjection(i, parameter, projected);
+            }
+        }
+
+        return bestProjection;
     }
 
     private Point projectPointToInfiniteLine(Point point, Point lineStart, Point lineEnd) {
@@ -773,6 +1128,18 @@ public class CanvasController {
         double t = ((point.getX() - start.getX()) * dx + (point.getY() - start.getY()) * dy) / lengthSquared;
         t = Math.max(0.0, Math.min(1.0, t));
         return new Point(start.getX() + dx * t, start.getY() + dy * t);
+    }
+
+    private double projectParameter(Point point, Point start, Point end) {
+        double dx = end.getX() - start.getX();
+        double dy = end.getY() - start.getY();
+        double lengthSquared = dx * dx + dy * dy;
+        if (lengthSquared < 1e-9) {
+            return 0.0;
+        }
+
+        double t = ((point.getX() - start.getX()) * dx + (point.getY() - start.getY()) * dy) / lengthSquared;
+        return Math.max(0.0, Math.min(1.0, t));
     }
 
     private Point projectPointToCircle(Point point, Point center, double radius) {
@@ -838,20 +1205,39 @@ public class CanvasController {
         return normalized;
     }
 
-    private Primitive findPrimitiveAt(Point worldPoint) {
+    private SelectionHit findPrimitiveAt(Point worldPoint, boolean preferUnderlyingGeometry) {
         // Минимум 5 мировых единиц для выбора маленьких примитивов при большом зуме
         double tolerancePixels = 10.0;
         double toleranceWorld = tolerancePixels / camera.getScale();
         double tolerance = Math.max(toleranceWorld, 5.0);
         
         var primitives = model.getPrimitives();
+        Primitive topHit = null;
         for (int i = primitives.size() - 1; i >= 0; i--) {
             Primitive p = primitives.get(i);
+            if (!model.isPrimitiveLayerVisible(p) || model.isPrimitiveLayerLocked(p)) {
+                continue;
+            }
             if (p.containsPoint(worldPoint, tolerance)) {
-                return p;
+                if (topHit == null) {
+                    topHit = p;
+                    if (!preferUnderlyingGeometry || !(p instanceof DimensionPrimitive)) {
+                        return new SelectionHit(p, false);
+                    }
+                    continue;
+                }
+
+                if (preferUnderlyingGeometry && topHit instanceof DimensionPrimitive
+                        && !(p instanceof DimensionPrimitive)) {
+                    return new SelectionHit(p, true);
+                }
             }
         }
-        return null;
+        return new SelectionHit(topHit, false);
+    }
+
+    private Primitive findPrimitiveAt(Point worldPoint) {
+        return findPrimitiveAt(worldPoint, false).primitive();
     }
     
     private ControlPoint findControlPointAt(Primitive primitive, double screenX, double screenY) {

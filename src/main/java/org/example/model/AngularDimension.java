@@ -26,6 +26,18 @@ public class AngularDimension extends DimensionPrimitive {
         return vertexAnchor.resolve();
     }
 
+    public DimensionAnchor getVertexAnchor() {
+        return vertexAnchor;
+    }
+
+    public DimensionAnchor getFirstRayAnchor() {
+        return firstRayAnchor;
+    }
+
+    public DimensionAnchor getSecondRayAnchor() {
+        return secondRayAnchor;
+    }
+
     public Point getFirstRayPoint() {
         return firstRayAnchor.resolve();
     }

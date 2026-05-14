@@ -3,6 +3,7 @@ package org.example.model;
 public enum PrimitiveType {
     POINT("Точка"),
     SEGMENT("Отрезок"),
+    POLYLINE("Ломаная"),
     CIRCLE("Окружность"),
     ARC("Дуга"),
     RECTANGLE("Прямоугольник"),

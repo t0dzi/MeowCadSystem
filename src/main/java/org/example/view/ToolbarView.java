@@ -11,6 +11,7 @@ import org.example.export.DxfImporter;
 import org.example.model.*;
 
 import java.io.File;
+import java.util.ArrayList;
 
 /*
  * Верхняя панель инструментов. Содержит кнопки для сохранения, импорта, удаления, 
@@ -30,6 +31,7 @@ public class ToolbarView {
     private Spinner<Integer> zigzagCountSpinner;
 
     private MenuButton snapMenuButton;
+    private Label pendingLayerLabel;
 
     public ToolbarView(CadModel model, CameraModel camera, CanvasPainter painter, Canvas canvas,
             StyleManager styleManager, Stage stage) {
@@ -51,20 +53,21 @@ public class ToolbarView {
         importButton.setOnAction(e -> showImportDialog());
 
         Button deleteButton = new Button("Удалить");
-        deleteButton.setOnAction(e -> {
-            Primitive selected = model.getSelectedPrimitive();
-            if (selected != null) {
-                model.removePrimitive(selected);
-                model.setSelectedPrimitive(null);
-                painter.redrawAll();
-            }
-        });
+        deleteButton.setOnAction(e -> removeSelectedPrimitives());
 
         Button deleteAllButton = new Button("Удалить всё");
         deleteAllButton.setOnAction(e -> {
             model.clearAll();
             painter.redrawAll();
         });
+
+        Button glueButton = new Button("Склеить");
+        glueButton.setTooltip(new Tooltip("Склеить выбранные отрезки/ломаные в один объект (Ctrl+клик для множественного выбора)"));
+        glueButton.setOnAction(e -> glueSelection());
+
+        Button unglueButton = new Button("Расклеить");
+        unglueButton.setTooltip(new Tooltip("Разбить выбранную ломаную обратно на отрезки"));
+        unglueButton.setOnAction(e -> unglueSelection());
 
         ComboBox<LineStyle> styleComboBox = new ComboBox<>(styleManager.getStyles());
         styleComboBox.setPrefWidth(200);
@@ -82,9 +85,18 @@ public class ToolbarView {
 
             updateZigzagOptionsVisibility(selectedStyle);
 
-            Primitive selected = model.getSelectedPrimitive();
-            if (selected != null && selectedStyle != null && selected.getLineStyle() != selectedStyle) {
-                selected.setLineStyle(selectedStyle);
+            if (selectedStyle == null) {
+                return;
+            }
+
+            for (Primitive selected : model.getSelectedPrimitives()) {
+                if (selected.getLineStyle() != selectedStyle) {
+                    selected.setLineStyle(selectedStyle);
+                    model.markChanged();
+                }
+            }
+
+            if (!model.getSelectedPrimitives().isEmpty()) {
                 painter.redrawAll();
             }
         });
@@ -129,11 +141,14 @@ public class ToolbarView {
         resetViewBtn.setOnAction(e -> camera.reset());
 
         HBox snapBox = createSnapPanel();
+        HBox layerBox = createLayerPanel();
 
         return new ToolBar(
                 saveButton, importButton,
                 new Separator(),
-                deleteButton, deleteAllButton,
+                deleteButton, deleteAllButton, glueButton, unglueButton,
+                new Separator(),
+                layerBox,
                 new Separator(),
                 styleComboBox, editStylesBtn, zigzagOptionsBox,
                 new Separator(),
@@ -176,6 +191,69 @@ public class ToolbarView {
         HBox box = new HBox(3, snapToggle, snapMenuButton);
         box.setAlignment(Pos.CENTER_LEFT);
         return box;
+    }
+
+    private HBox createLayerPanel() {
+        ToggleGroup activeLayerGroup = new ToggleGroup();
+
+        ToggleButton layer1Button = createLayerButton(CadModel.LAYER_1, activeLayerGroup);
+        ToggleButton layer2Button = createLayerButton(CadModel.LAYER_2, activeLayerGroup);
+        ToggleButton layer3Button = createLayerButton(CadModel.LAYER_3, activeLayerGroup);
+        layer1Button.setSelected(true);
+
+        CheckBox layer2Visible = createLayerVisibilityBox(CadModel.LAYER_2);
+        CheckBox layer3Visible = createLayerVisibilityBox(CadModel.LAYER_3);
+
+        Button clearOtherLayers = new Button("Очистить 2/3");
+        clearOtherLayers.setTooltip(new Tooltip("Удалить примитивы со всех слоёв, кроме главного"));
+        clearOtherLayers.setOnAction(e -> {
+            model.clearNonDefaultLayerPrimitives();
+            painter.redrawAll();
+        });
+
+        pendingLayerLabel = new Label("");
+        pendingLayerLabel.setMinWidth(130);
+        pendingLayerLabel.setStyle("-fx-text-fill: #555;");
+        model.pendingLayerAssignmentNameProperty().addListener((obs, oldValue, newValue) -> {
+            pendingLayerLabel.setText(newValue == null ? "" : "Клик: " + newValue);
+        });
+
+        HBox box = new HBox(4,
+                new Label("Слои:"),
+                layer1Button,
+                layer2Button, layer2Visible,
+                layer3Button, layer3Visible,
+                clearOtherLayers,
+                pendingLayerLabel);
+        box.setAlignment(Pos.CENTER_LEFT);
+        return box;
+    }
+
+    private ToggleButton createLayerButton(String layerName, ToggleGroup group) {
+        ToggleButton button = new ToggleButton(layerName);
+        button.setToggleGroup(group);
+        button.setTooltip(new Tooltip("Сделать активным и назначить следующим кликом. Ctrl+клик по примитиву вернёт его на слой 1."));
+        button.setOnAction(e -> {
+            if (!button.isSelected()) {
+                button.setSelected(true);
+                return;
+            }
+            model.armLayerAssignment(layerName);
+            painter.redrawAll();
+        });
+        return button;
+    }
+
+    private CheckBox createLayerVisibilityBox(String layerName) {
+        Layer layer = model.getLayer(layerName);
+        CheckBox checkBox = new CheckBox();
+        checkBox.setSelected(layer == null || layer.isVisible());
+        checkBox.setTooltip(new Tooltip("Показать/скрыть " + layerName));
+        checkBox.selectedProperty().addListener((obs, oldValue, newValue) -> {
+            model.setLayerVisible(layerName, newValue);
+            painter.redrawAll();
+        });
+        return checkBox;
     }
 
     private CheckMenuItem createSnapMenuItem(String name, SnapType type, SnapManager snapManager) {
@@ -238,6 +316,45 @@ public class ToolbarView {
             currentStyle.setDashPattern(new double[] { height, width, count });
             painter.redrawAll();
         }
+    }
+
+    private void removeSelectedPrimitives() {
+        if (model.getSelectedPrimitives().isEmpty()) {
+            return;
+        }
+
+        for (Primitive primitive : new ArrayList<>(model.getSelectedPrimitives())) {
+            model.removePrimitive(primitive);
+        }
+        painter.redrawAll();
+    }
+
+    private void glueSelection() {
+        if (model.glueSelectedPrimitives()) {
+            painter.redrawAll();
+            return;
+        }
+
+        showOperationError("Не удалось склеить",
+                "Выберите минимум два связанных отрезка или незамкнутые ломаные. Выбор нескольких объектов: Ctrl+клик.");
+    }
+
+    private void unglueSelection() {
+        if (model.unglueSelectedPrimitives()) {
+            painter.redrawAll();
+            return;
+        }
+
+        showOperationError("Не удалось расклеить",
+                "Для расклейки выберите одну или несколько ломаных, полученных после склейки или импортированных из DXF.");
+    }
+
+    private void showOperationError(String title, String message) {
+        Alert alert = new Alert(Alert.AlertType.WARNING);
+        alert.setTitle(title);
+        alert.setHeaderText(null);
+        alert.setContentText(message);
+        alert.showAndWait();
     }
 
     private void zoomAroundCenter(double factor) {
@@ -356,9 +473,10 @@ public class ToolbarView {
         if (file != null) {
             try {
                 DxfExporter exporter = new DxfExporter(
-                        DxfExporter.DxfVersion.R12,
+                        DxfExporter.DxfVersion.R2007,
                         DxfExporter.DxfUnits.MILLIMETERS);
                 exporter.export(model, file);
+                model.markSaved();
 
                 Alert alert = new Alert(Alert.AlertType.INFORMATION);
                 alert.setTitle("Сохранение");
@@ -436,4 +554,3 @@ public class ToolbarView {
         }
     }
 }
-
